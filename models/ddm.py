@@ -191,7 +191,6 @@ class DenoisingDiffusion(object):
 
         self.model = Net(args, config)
         self.model.to(self.device)
-        self.model = torch.nn.DataParallel(self.model, device_ids=range(torch.cuda.device_count()))
 
         self.ema_helper = EMAHelper()
         self.ema_helper.register(self.model)
