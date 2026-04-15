@@ -1,7 +1,7 @@
 import os
 import torch
 import torch.utils.data
-from PIL import Image
+from PIL import Image, ImageOps
 from datasets.data_augment import PairCompose, PairToTensor, PairRandomHorizontalFilp
 
 
@@ -57,7 +57,10 @@ class AllWeatherDataset(torch.utils.data.Dataset):
         low_img_name, high_img_name = input_name.split(' ')[0], input_name.split(' ')[1]
 
         img_id = low_img_name.split('/')[-1]
-        low_img, high_img = Image.open(low_img_name), Image.open(high_img_name)
+        # Honor EXIF orientation (common for phone photos) to avoid apparent
+        # rotation/misalignment between the input and saved output.
+        low_img = ImageOps.exif_transpose(Image.open(low_img_name))
+        high_img = ImageOps.exif_transpose(Image.open(high_img_name))
 
         low_img, high_img = self.transforms(low_img, high_img)
 

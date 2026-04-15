@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
+from collections import OrderedDict
 import utils
 from models.unet import DiffusionUNet
 from models.decom import CTDN
@@ -202,8 +203,17 @@ class DenoisingDiffusion(object):
         self.start_epoch, self.step = 0, 0
 
     def load_ddm_ckpt(self, load_path, ema=False):
-        checkpoint = utils.logging.load_checkpoint(load_path, None)
-        self.model.load_state_dict(checkpoint['state_dict'], strict=True)
+        checkpoint = utils.logging.load_checkpoint(load_path, self.device)
+
+        state_dict = checkpoint['state_dict']
+        # Handle checkpoints saved from nn.DataParallel (keys prefixed with 'module.').
+        if any(k.startswith('module.') for k in state_dict.keys()):
+            new_state_dict = OrderedDict()
+            for k, v in state_dict.items():
+                new_state_dict[k[len('module.'):]] = v
+            state_dict = new_state_dict
+
+        self.model.load_state_dict(state_dict, strict=True)
         if ema:
             self.ema_helper.ema(self.model)
         print("=> loaded checkpoint {} step {}".format(load_path, self.step))

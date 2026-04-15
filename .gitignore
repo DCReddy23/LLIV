@@ -1,0 +1,22 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+.venv-gpu/
+venv/
+
+# Model checkpoints (large binaries)
+ckpt/
+
+# Outputs
+results/
+results_gpu/
+results_ui/
+# demo_data/
+
+# Gradio local state
+.gradio/
+# VS Code
+.vscode/
