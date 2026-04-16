@@ -10,6 +10,11 @@ import torch.nn.functional
 
 def get_timestep_embedding(timesteps, embedding_dim):
     """
+    Builds sinusoidal timestep embeddings for diffusion models (matches DDPM/transformer style).
+    Input: timesteps (B,), embedding_dim (int).
+    Output: (B, embedding_dim) tensor.
+    """
+    """
     This matches the implementation in Denoising Diffusion Probabilistic Models:
     From Fairseq.
     Build sinusoidal embeddings.
@@ -30,15 +35,24 @@ def get_timestep_embedding(timesteps, embedding_dim):
 
 
 def nonlinearity(x):
+    """
+    Swish activation: x * sigmoid(x).
+    """
     # swish
     return x*torch.sigmoid(x)
 
 
 def Normalize(in_channels):
+    """
+    Returns GroupNorm layer with 32 groups for given channel count.
+    """
     return torch.nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
 
 
 class Upsample(nn.Module):
+    """
+    Upsamples input by 2x (nearest neighbor), with optional 3x3 conv.
+    """
     def __init__(self, in_channels, with_conv):
         super().__init__()
         self.with_conv = with_conv
@@ -58,6 +72,9 @@ class Upsample(nn.Module):
 
 
 class Downsample(nn.Module):
+    """
+    Downsamples input by 2x (stride-2 conv or avg pool).
+    """
     def __init__(self, in_channels, with_conv):
         super().__init__()
         self.with_conv = with_conv
@@ -80,6 +97,9 @@ class Downsample(nn.Module):
 
 
 class ResnetBlock(nn.Module):
+    """
+    Residual block with optional shortcut and timestep embedding conditioning.
+    """
     def __init__(self, *, in_channels, out_channels=None, conv_shortcut=False,
                  dropout, temb_channels=512):
         super().__init__()
@@ -140,6 +160,9 @@ class ResnetBlock(nn.Module):
 
 
 class AttnBlock(nn.Module):
+    """
+    Self-attention block over spatial positions (applies at one U-Net resolution).
+    """
     def __init__(self, in_channels):
         super().__init__()
         self.in_channels = in_channels
@@ -195,6 +218,9 @@ class AttnBlock(nn.Module):
 
 
 class DiffusionUNet(nn.Module):
+    """
+    Multi-resolution U-Net backbone for diffusion. Supports conditional input, attention, and timestep embedding.
+    """
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -294,6 +320,10 @@ class DiffusionUNet(nn.Module):
                                         padding=1)
 
     def forward(self, x, t):
+        """
+        Forward pass: processes input x with timestep embedding t through U-Net.
+        Returns predicted noise/residual.
+        """
         # assert x.shape[2] == x.shape[3] == self.resolution
 
         # timestep embedding

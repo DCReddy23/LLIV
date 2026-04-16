@@ -11,6 +11,9 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 
 class Depth_conv(nn.Module):
+    """
+    Depthwise separable convolution: spatial conv per channel, then 1x1 conv to mix channels.
+    """
     def __init__(self, in_ch, out_ch):
         super(Depth_conv, self).__init__()
         self.depth_conv = nn.Conv2d(
@@ -37,6 +40,9 @@ class Depth_conv(nn.Module):
 
 
 class Res_block(nn.Module):
+    """
+    Simple residual block: two 3x3 convs with LeakyReLU, plus 1x1 shortcut.
+    """
     def __init__(self, in_channels, out_channels):
         super(Res_block, self).__init__()
 
@@ -59,6 +65,9 @@ class Res_block(nn.Module):
 
 
 class upsampling(nn.Module):
+    """
+    Upsampling block: ConvTranspose2d + LeakyReLU.
+    """
     def __init__(self, in_channels, out_channels):
         super(upsampling, self).__init__()
 
@@ -73,6 +82,9 @@ class upsampling(nn.Module):
 
 
 class channel_down(nn.Module):
+    """
+    Reduces feature channels to 3 (RGB) via conv stack and sigmoid.
+    """
     def __init__(self, channels):
         super(channel_down, self).__init__()
 
@@ -89,6 +101,9 @@ class channel_down(nn.Module):
 
 
 class channel_up(nn.Module):
+    """
+    Expands 3-channel input to high-dimensional feature tensor via conv stack.
+    """
     def __init__(self, channels):
         super(channel_up, self).__init__()
 
@@ -105,6 +120,10 @@ class channel_up(nn.Module):
 
 
 class feature_pyramid(nn.Module):
+    """
+    Builds multi-scale feature pyramid from input image.
+    Returns three levels of features.
+    """
     def __init__(self, channels):
         super(feature_pyramid, self).__init__()
 
@@ -135,6 +154,11 @@ class feature_pyramid(nn.Module):
 
 
 class ReconNet(nn.Module):
+    """
+    Encoder-decoder for feature extraction and image reconstruction.
+    If pred_fea is None: extracts features from low/high images.
+    If pred_fea is given: decodes features to RGB image.
+    """
     def __init__(self, channels):
         super(ReconNet, self).__init__()
 
@@ -187,6 +211,9 @@ class ReconNet(nn.Module):
 
 
 class Self_Attention(nn.Module):
+    """
+    Channel-mixing self-attention block (not standard spatial attention).
+    """
     def __init__(self, dim, num_heads, bias):
         super(Self_Attention, self).__init__()
         self.num_heads = num_heads
@@ -220,6 +247,9 @@ class Self_Attention(nn.Module):
 
 
 class Cross_Attention(nn.Module):
+    """
+    Channel-mixing cross-attention between hidden_states and context tensor.
+    """
     def __init__(self, dim, num_heads, dropout=0.):
         super(Cross_Attention, self).__init__()
         if dim % num_heads != 0:
@@ -270,6 +300,9 @@ class Cross_Attention(nn.Module):
 
 
 class Retinex_decom(nn.Module):
+    """
+    Retinex-style decomposition: estimates reflectance and illumination from features using attention.
+    """
     def __init__(self, channels):
         super(Retinex_decom, self).__init__()
 
@@ -311,6 +344,11 @@ class Retinex_decom(nn.Module):
 
 
 class CTDN(nn.Module):
+    """
+    Top-level decomposition + reconstruction module.
+    If pred_fea is None: decomposes low/high images to features and retinex outputs.
+    If pred_fea is given: reconstructs enhanced image from low + features.
+    """
     def __init__(self, channels=64):
         super(CTDN, self).__init__()
 

@@ -7,7 +7,13 @@ import torch.nn.functional as F
 
 
 class DiffusiveRestoration:
+    """
+    Evaluation-time restoration harness. Handles checkpoint loading, full-res and tiled inference, and saving outputs.
+    """
     def __init__(self, diffusion, args, config):
+        """
+        Initializes restoration wrapper, loads checkpoint if present, sets model to eval mode.
+        """
         super(DiffusiveRestoration, self).__init__()
         self.args = args
         self.config = config
@@ -20,6 +26,9 @@ class DiffusiveRestoration:
             print('Pre-trained model path is missing!')
 
     def restore(self, val_loader):
+        """
+        Runs restoration on a validation DataLoader. Handles OOM fallback to tiled inference and saves results.
+        """
         image_folder = os.path.join(self.args.image_folder, self.config.data.val_dataset)
         os.makedirs(image_folder, exist_ok=True)
         with torch.no_grad():
@@ -57,6 +66,10 @@ class DiffusiveRestoration:
                 print(f"processing image {y[0]}, time={t2 - t1}")
 
     def _restore_tiled(self, x_cond_cpu: torch.Tensor, *, h: int, w: int) -> torch.Tensor:
+        """
+        Runs restoration in overlapping tiles to reduce GPU memory usage. Blends tiles to reduce seams.
+        Returns a CPU tensor shaped (B, 3, H, W) in [0, 1].
+        """
         """Run restoration in overlapping tiles to reduce GPU memory usage.
 
         Returns a CPU tensor shaped (B, 3, H, W) in [0, 1].

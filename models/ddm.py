@@ -12,6 +12,9 @@ from models.decom import CTDN
 
 
 class EMAHelper(object):
+    """
+    Maintains an exponential moving average (EMA) of model parameters for evaluation stability.
+    """
     def __init__(self, mu=0.9999):
         self.mu = mu
         self.shadow = {}
@@ -57,6 +60,10 @@ class EMAHelper(object):
 
 
 def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_timesteps):
+    """
+    Returns a beta schedule (noise schedule) for diffusion based on the chosen strategy.
+    Supported: 'linear', 'quad', 'const', 'jsd', 'sigmoid'.
+    """
     def sigmoid(x):
         return 1 / (np.exp(-x) + 1)
 
@@ -78,6 +85,9 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
 
 
 class Net(nn.Module):
+    """
+    Main model: wraps DiffusionUNet and CTDN. Handles both training and inference pipelines.
+    """
     def __init__(self, args, config):
         super(Net, self).__init__()
 
@@ -103,17 +113,27 @@ class Net(nn.Module):
 
     @staticmethod
     def compute_alpha(beta, t):
+        """
+        Compute cumulative product of (1-beta) up to timestep t for diffusion process.
+        """
         beta = torch.cat([torch.zeros(1).to(beta.device), beta], dim=0)
         a = (1 - beta).cumprod(dim=0).index_select(0, t + 1).view(-1, 1, 1, 1)
         return a
 
     @staticmethod
     def load_stage1(model, model_dir):
+        """
+        Loads stage1 CTDN weights from checkpoint for use in training.
+        """
         checkpoint = utils.logging.load_checkpoint(os.path.join(model_dir, 'stage1_weight.pth.tar'), 'cuda')
         model.load_state_dict(checkpoint['model'], strict=True)
         return model
 
     def sample_training(self, x_cond, b, eta=0.):
+        """
+        DDIM-like sampling: generates predicted features from conditioning tensor.
+        Used in both training and inference.
+        """
         skip = self.config.diffusion.num_diffusion_timesteps // self.config.diffusion.num_sampling_timesteps
         seq = range(0, self.config.diffusion.num_diffusion_timesteps, skip)
         n, c, h, w = x_cond.shape
@@ -138,6 +158,11 @@ class Net(nn.Module):
         return xs[-1]
 
     def forward(self, inputs):
+        """
+        Forward pass for both training and evaluation.
+        Training: returns noise prediction, sampled noise, predicted features, and reference features.
+        Eval: returns predicted enhanced image.
+        """
         data_dict = {}
 
         b = self.betas.to(inputs.device)
@@ -184,6 +209,9 @@ class Net(nn.Module):
 
 
 class DenoisingDiffusion(object):
+    """
+    Training and inference harness for the diffusion model. Handles checkpointing, optimizer, and validation.
+    """
     def __init__(self, args, config):
         super().__init__()
         self.args = args
@@ -203,6 +231,9 @@ class DenoisingDiffusion(object):
         self.start_epoch, self.step = 0, 0
 
     def load_ddm_ckpt(self, load_path, ema=False):
+        """
+        Loads a stage2 checkpoint (optionally EMA weights) into the model. Handles DataParallel checkpoints.
+        """
         checkpoint = utils.logging.load_checkpoint(load_path, self.device)
 
         state_dict = checkpoint['state_dict']
@@ -219,6 +250,9 @@ class DenoisingDiffusion(object):
         print("=> loaded checkpoint {} step {}".format(load_path, self.step))
 
     def train(self, DATASET):
+        """
+        Main training loop for diffusion model. Handles freezing CTDN, optimizer, validation, and checkpointing.
+        """
         cudnn.benchmark = True
         train_loader, val_loader = DATASET.get_loaders()
 
@@ -274,6 +308,9 @@ class DenoisingDiffusion(object):
                                                   filename=os.path.join(self.config.data.ckpt_dir, 'model_latest'))
 
     def noise_estimation_loss(self, output):
+        """
+        Computes noise prediction loss (MSE) and SCC feature loss (L1) for training.
+        """
         pred_fea, reference_fea = output["pred_fea"], output["reference_fea"]
         noise_output, e = output["noise_output"], output["e"]
         # ==================noise loss==================
@@ -284,6 +321,9 @@ class DenoisingDiffusion(object):
         return noise_loss, scc_loss
 
     def sample_validation_patches(self, val_loader, step):
+        """
+        Runs validation: saves predicted patches for visual monitoring during training.
+        """
         image_folder = os.path.join(self.args.image_folder,
                                     self.config.data.type + str(self.config.data.patch_size))
         self.model.eval()
