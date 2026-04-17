@@ -6,6 +6,55 @@ import time
 import torch.nn.functional as F
 
 
+def _psnr(pred: torch.Tensor, target: torch.Tensor, *, max_val: float = 1.0, eps: float = 1e-10) -> torch.Tensor:
+    """Compute PSNR for tensors in [0, max_val]. Returns a scalar tensor."""
+    mse = torch.mean((pred - target) ** 2)
+    return 10.0 * torch.log10((max_val**2) / (mse + eps))
+
+
+def _gaussian_kernel_2d(*, kernel_size: int = 11, sigma: float = 1.5, device=None, dtype=None) -> torch.Tensor:
+    if kernel_size % 2 == 0:
+        raise ValueError("kernel_size must be odd")
+    coords = torch.arange(kernel_size, device=device, dtype=dtype) - (kernel_size - 1) / 2.0
+    g = torch.exp(-(coords**2) / (2 * sigma**2))
+    g = g / g.sum()
+    kernel_2d = (g[:, None] * g[None, :]).unsqueeze(0).unsqueeze(0)
+    return kernel_2d
+
+
+def _ssim(pred: torch.Tensor, target: torch.Tensor, *, max_val: float = 1.0, eps: float = 1e-12) -> torch.Tensor:
+    """Compute SSIM for (B,C,H,W) tensors in [0, max_val]. Returns a scalar tensor."""
+    if pred.ndim != 4 or target.ndim != 4:
+        raise ValueError("pred/target must be BCHW")
+    if pred.shape != target.shape:
+        raise ValueError("pred and target must have the same shape")
+
+    device = pred.device
+    dtype = pred.dtype
+    channels = pred.shape[1]
+
+    kernel = _gaussian_kernel_2d(kernel_size=11, sigma=1.5, device=device, dtype=dtype)
+    kernel = kernel.repeat(channels, 1, 1, 1)
+
+    # Compute local means via grouped conv.
+    mu_x = F.conv2d(pred, kernel, padding=5, groups=channels)
+    mu_y = F.conv2d(target, kernel, padding=5, groups=channels)
+
+    mu_x2 = mu_x * mu_x
+    mu_y2 = mu_y * mu_y
+    mu_xy = mu_x * mu_y
+
+    sigma_x2 = F.conv2d(pred * pred, kernel, padding=5, groups=channels) - mu_x2
+    sigma_y2 = F.conv2d(target * target, kernel, padding=5, groups=channels) - mu_y2
+    sigma_xy = F.conv2d(pred * target, kernel, padding=5, groups=channels) - mu_xy
+
+    c1 = (0.01 * max_val) ** 2
+    c2 = (0.03 * max_val) ** 2
+
+    ssim_map = ((2 * mu_xy + c1) * (2 * sigma_xy + c2)) / ((mu_x2 + mu_y2 + c1) * (sigma_x2 + sigma_y2 + c2) + eps)
+    return ssim_map.mean()
+
+
 class DiffusionRestorationPipeline:
     """
     Evaluation-time restoration harness. Handles checkpoint loading, full-res and tiled inference, and saving outputs.
@@ -31,6 +80,12 @@ class DiffusionRestorationPipeline:
         """
         image_folder = os.path.join(self.args.image_folder, self.config.data.val_dataset)
         os.makedirs(image_folder, exist_ok=True)
+
+        # Metric accumulators (computed only when GT is available in the batch tensor).
+        total_psnr = 0.0
+        total_ssim = 0.0
+        metric_count = 0
+
         with torch.no_grad():
             for i, (x, y) in enumerate(val_loader):
 
@@ -62,8 +117,36 @@ class DiffusionRestorationPipeline:
                     pred_x = self._restore_tiled(conditioning_image_cpu, h=height, w=width)
                     end_time = time.time()
 
+                # --- Optional metrics (paired eval only) ---
+                # Dataset convention: x is (B,6,H,W) where the last 3 channels are the GT/high image.
+                if x.ndim == 4 and x.shape[1] >= 6:
+                    gt = x[:, 3:6, :, :].contiguous()
+
+                    # Ensure pred_x and gt are on the same device for metric computation.
+                    pred_for_metrics = pred_x.detach()
+                    if pred_for_metrics.device != gt.device:
+                        gt = gt.to(pred_for_metrics.device)
+
+                    pred_for_metrics = pred_for_metrics.clamp(0, 1)
+                    gt = gt.clamp(0, 1)
+
+                    psnr_val = _psnr(pred_for_metrics, gt).item()
+                    ssim_val = _ssim(pred_for_metrics, gt).item()
+                    total_psnr += psnr_val
+                    total_ssim += ssim_val
+                    metric_count += 1
+                    metric_str = f"PSNR={psnr_val:.2f} SSIM={ssim_val:.4f}"
+                else:
+                    metric_str = "PSNR/SSIM=N/A (no GT in batch)"
+
                 utils.logging.save_image(pred_x, os.path.join(image_folder, f"{y[0]}"))
-                print(f"processing image {y[0]}, time={end_time - start_time}")
+                print(f"processing image {y[0]}, time={end_time - start_time:.3f}s, {metric_str}")
+
+        if metric_count > 0:
+            print(
+                f"\nDataset metrics over {metric_count} images: "
+                f"avg_PSNR={total_psnr / metric_count:.2f} avg_SSIM={total_ssim / metric_count:.4f}\n"
+            )
 
     def _restore_tiled(self, x_cond_cpu: torch.Tensor, *, h: int, w: int) -> torch.Tensor:
         """

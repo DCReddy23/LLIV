@@ -15,6 +15,53 @@ from models import DenoisingDiffusionPipeline
 import utils
 
 
+def _psnr(pred: torch.Tensor, target: torch.Tensor, *, max_val: float = 1.0, eps: float = 1e-10) -> torch.Tensor:
+    """Compute PSNR for tensors in [0, max_val]. Returns a scalar tensor."""
+    mse = torch.mean((pred - target) ** 2)
+    return 10.0 * torch.log10((max_val**2) / (mse + eps))
+
+
+def _gaussian_kernel_2d(*, kernel_size: int = 11, sigma: float = 1.5, device=None, dtype=None) -> torch.Tensor:
+    if kernel_size % 2 == 0:
+        raise ValueError("kernel_size must be odd")
+    coords = torch.arange(kernel_size, device=device, dtype=dtype) - (kernel_size - 1) / 2.0
+    g = torch.exp(-(coords**2) / (2 * sigma**2))
+    g = g / g.sum()
+    return (g[:, None] * g[None, :]).unsqueeze(0).unsqueeze(0)
+
+
+def _ssim(pred: torch.Tensor, target: torch.Tensor, *, max_val: float = 1.0, eps: float = 1e-12) -> torch.Tensor:
+    """Compute SSIM for (B,C,H,W) tensors in [0, max_val]. Returns a scalar tensor."""
+    if pred.ndim != 4 or target.ndim != 4:
+        raise ValueError("pred/target must be BCHW")
+    if pred.shape != target.shape:
+        raise ValueError("pred and target must have the same shape")
+
+    device = pred.device
+    dtype = pred.dtype
+    channels = pred.shape[1]
+
+    kernel = _gaussian_kernel_2d(kernel_size=11, sigma=1.5, device=device, dtype=dtype)
+    kernel = kernel.repeat(channels, 1, 1, 1)
+
+    mu_x = F.conv2d(pred, kernel, padding=5, groups=channels)
+    mu_y = F.conv2d(target, kernel, padding=5, groups=channels)
+
+    mu_x2 = mu_x * mu_x
+    mu_y2 = mu_y * mu_y
+    mu_xy = mu_x * mu_y
+
+    sigma_x2 = F.conv2d(pred * pred, kernel, padding=5, groups=channels) - mu_x2
+    sigma_y2 = F.conv2d(target * target, kernel, padding=5, groups=channels) - mu_y2
+    sigma_xy = F.conv2d(pred * target, kernel, padding=5, groups=channels) - mu_xy
+
+    c1 = (0.01 * max_val) ** 2
+    c2 = (0.03 * max_val) ** 2
+
+    ssim_map = ((2 * mu_xy + c1) * (2 * sigma_xy + c2)) / ((mu_x2 + mu_y2 + c1) * (sigma_x2 + sigma_y2 + c2) + eps)
+    return ssim_map.mean()
+
+
 def dict2namespace(config: dict) -> argparse.Namespace:
     namespace = argparse.Namespace()
     for key, value in config.items():
@@ -161,7 +208,13 @@ def make_infer_fn(config_path: str, resume_path: str):
     quality_steps = 50
 
     @torch.no_grad()
-    def infer(input_image: Image.Image, quality: str, blend: str, show_stage_outputs: bool) -> tuple[Image.Image, dict]:
+    def infer_core(
+        input_image: Image.Image,
+        reference_image: Image.Image | None,
+        quality: str,
+        blend: str,
+        show_stage_outputs: bool,
+    ) -> tuple[Image.Image, str, dict]:
         if input_image is None:
             raise gr.Error("Please upload an image")
 
@@ -290,6 +343,23 @@ def make_infer_fn(config_path: str, resume_path: str):
 
         output_image = TF.to_pil_image(predicted_tensor)
 
+        # Optional metrics (requires a reference/GT image).
+        metrics_text = "PSNR/SSIM: N/A (no reference image uploaded)"
+        if reference_image is not None:
+            ref_img = ImageOps.exif_transpose(reference_image).convert("RGB")
+            if ref_img.size != output_image.size:
+                # Keep it simple for UI usage: resize ref to match output.
+                ref_img = ref_img.resize(output_image.size, Image.BICUBIC)
+                resize_note = " (ref resized to match output)"
+            else:
+                resize_note = ""
+
+            gt = TF.to_tensor(ref_img).unsqueeze(0)  # 1x3xHxW in [0,1]
+            pred = predicted_tensor.unsqueeze(0).clamp(0, 1)  # 1x3xHxW
+            psnr_val = _psnr(pred, gt).item()
+            ssim_val = _ssim(pred, gt).item()
+            metrics_text = f"PSNR={psnr_val:.2f} dB, SSIM={ssim_val:.4f}{resize_note}"
+
         out_dir = os.path.join("results_ui")
         os.makedirs(out_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -300,11 +370,43 @@ def make_infer_fn(config_path: str, resume_path: str):
 
         if show_stage_outputs:
             debug_text = "\n".join(debug_lines)
-            return output_image, gr.update(value=debug_text, visible=True)
+            return output_image, metrics_text, gr.update(value=debug_text, visible=True)
 
-        return output_image, gr.update(value="", visible=False)
+        return output_image, metrics_text, gr.update(value="", visible=False)
 
-    return infer
+    @torch.no_grad()
+    def infer_enhance(
+        input_image: Image.Image,
+        quality: str,
+        blend: str,
+        show_stage_outputs: bool,
+    ) -> tuple[Image.Image, dict]:
+        output_image, _metrics_text, stage_update = infer_core(
+            input_image=input_image,
+            reference_image=None,
+            quality=quality,
+            blend=blend,
+            show_stage_outputs=show_stage_outputs,
+        )
+        return output_image, stage_update
+
+    @torch.no_grad()
+    def infer_metrics(
+        input_image: Image.Image,
+        reference_image: Image.Image,
+        quality: str,
+        blend: str,
+    ) -> tuple[Image.Image, str]:
+        output_image, metrics_text, _stage_update = infer_core(
+            input_image=input_image,
+            reference_image=reference_image,
+            quality=quality,
+            blend=blend,
+            show_stage_outputs=False,
+        )
+        return output_image, metrics_text
+
+    return infer_enhance, infer_metrics
 
 
 def main():
@@ -320,40 +422,83 @@ def main():
     print(f"- resume: {args.resume}", flush=True)
     print(f"- url: http://{args.host}:{args.port}", flush=True)
 
-    infer_fn = make_infer_fn(args.config, args.resume)
+    infer_enhance_fn, infer_metrics_fn = make_infer_fn(args.config, args.resume)
 
     with gr.Blocks() as demo:
         gr.Markdown("# LLIV stage2 inference")
 
-        input_image = gr.Image(type="pil", label="Upload image")
-        quality = gr.Dropdown(
-            choices=["Low (fast)", "Normal", "Higher quality"],
-            value="Normal",
-            label="Quality",
-        )
-        blend = gr.Dropdown(
-            choices=["High blend (seamless)", "Normal"],
-            value="High blend (seamless)",
-            label="Blend",
-        )
-        show_stage_outputs = gr.Checkbox(
-            value=False,
-            label="Show stage outputs (Model1/Model2)",
-        )
-        run_btn = gr.Button("Enhance")
+        with gr.Tabs():
+            with gr.TabItem("Enhance"):
+                gr.Markdown("Upload a low-light image and enhance it. Enable stage outputs if you want Model1/Model2 intermediate tensor stats.")
 
-        output_image = gr.Image(type="pil", label="Enhanced output")
-        stage_text = gr.Textbox(
-            label="Stage outputs (Model1/Model2)",
-            lines=18,
-            visible=False,
-        )
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        input_image = gr.Image(type="pil", label="Upload image")
 
-        run_btn.click(
-            fn=infer_fn,
-            inputs=[input_image, quality, blend, show_stage_outputs],
-            outputs=[output_image, stage_text],
-        )
+                        with gr.Row():
+                            quality = gr.Dropdown(
+                                choices=["Low (fast)", "Normal", "Higher quality"],
+                                value="Normal",
+                                label="Quality",
+                            )
+                            blend = gr.Dropdown(
+                                choices=["High blend (seamless)", "Normal"],
+                                value="High blend (seamless)",
+                                label="Blend",
+                            )
+
+                        show_stage_outputs = gr.Checkbox(
+                            value=False,
+                            label="Show stage outputs (Model1/Model2)",
+                        )
+                        run_btn = gr.Button("Enhance")
+
+                    with gr.Column(scale=1):
+                        output_image = gr.Image(type="pil", label="Enhanced output")
+                        stage_text = gr.Textbox(
+                            label="Stage outputs (Model1/Model2)",
+                            lines=18,
+                            visible=False,
+                        )
+
+                run_btn.click(
+                    fn=infer_enhance_fn,
+                    inputs=[input_image, quality, blend, show_stage_outputs],
+                    outputs=[output_image, stage_text],
+                )
+
+            with gr.TabItem("Metrics"):
+                gr.Markdown("Upload the same scene's reference/GT image to compute PSNR/SSIM against the enhanced output.")
+
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        with gr.Row():
+                            input_image_m = gr.Image(type="pil", label="Upload image")
+                            reference_image_m = gr.Image(type="pil", label="Reference (GT) image")
+
+                        with gr.Row():
+                            quality_m = gr.Dropdown(
+                                choices=["Low (fast)", "Normal", "Higher quality"],
+                                value="Normal",
+                                label="Quality",
+                            )
+                            blend_m = gr.Dropdown(
+                                choices=["High blend (seamless)", "Normal"],
+                                value="High blend (seamless)",
+                                label="Blend",
+                            )
+
+                        run_btn_m = gr.Button("Enhance + Compute metrics")
+
+                    with gr.Column(scale=1):
+                        output_image_m = gr.Image(type="pil", label="Enhanced output")
+                        metrics_box_m = gr.Textbox(label="Metrics (PSNR/SSIM)", lines=1)
+
+                run_btn_m.click(
+                    fn=infer_metrics_fn,
+                    inputs=[input_image_m, reference_image_m, quality_m, blend_m],
+                    outputs=[output_image_m, metrics_box_m],
+                )
 
     demo.launch(server_name=args.host, server_port=args.port)
 

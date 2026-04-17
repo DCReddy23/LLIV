@@ -19,6 +19,7 @@ If you want a focused explanation of just the core architecture (Model1/Model2),
   - **Reads:** `configs/<name>.yml` + a paired validation filelist `demo_data/<val_dataset>_val.txt` (or `<data_dir>/<val_dataset>_val.txt`).
   - **Runs:** `models.DiffusionRestorationPipeline.restore(val_loader)`.
   - **Outputs:** images saved under `--image_folder/<val_dataset>/...`.
+  - **Metrics (paired only):** prints per-image and dataset-average `PSNR` and `SSIM` (computed in `models/restoration.py`).
 
 - `cli_infer.py`
   - **Purpose:** single-image inference (no dataset/filelist needed).
