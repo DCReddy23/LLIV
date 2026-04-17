@@ -7,8 +7,8 @@ This is the **short version** of `TECHNICAL_DEEP_DIVE.md`: enough to understand 
 - **Input:** a low-light RGB image
 - **Output:** an enhanced RGB image
 - **Core idea:** a **two-stage pipeline**
-  - **Stage1 (CTDN / Retinex-like)**: decomposes low/high into reflectance + illumination and provides a decoder to reconstruct an image from “features”.
-  - **Stage2 (Diffusion)**: uses a diffusion sampler (DDIM-like) + U-Net to **predict better features**, then CTDN reconstructs the enhanced image.
+   - **Stage1 (DecompositionReconstructionNet / Retinex-like)**: decomposes low/high into reflectance + illumination and provides a decoder to reconstruct an image from “features”. (Alias: `CTDN`)
+   - **Stage2 (Diffusion)**: uses a diffusion sampler (DDIM-like) + U-Net to **predict better features**, then the decomposition/reconstruction net reconstructs the enhanced image.
 
 In practice, for enhancement you run **stage2 inference** using:
 
@@ -26,7 +26,7 @@ In practice, for enhancement you run **stage2 inference** using:
 
 - `models/ddm.py`: diffusion wrapper, sampling, checkpoint loading
 - `models/unet.py`: diffusion U-Net backbone
-- `models/decom.py`: CTDN decomposition + reconstruction (Retinex-inspired)
+- `models/decom.py`: `DecompositionReconstructionNet` (alias: `CTDN`) decomposition + reconstruction (Retinex-inspired)
 - `models/restoration.py`: eval-time restoration + CUDA OOM tiled fallback
 
 **Data + utils**
@@ -41,14 +41,14 @@ In practice, for enhancement you run **stage2 inference** using:
 
 1. Build a 6-channel input by duplicating the low image:
    - `x_in = cat([x_low, x_low], dim=1)` → `(B,6,H,W)`
-2. CTDN decomposition on `x_in` produces a low-light feature tensor `low_fea` (plus reflectance/illumination pieces internally).
+2. Decomposition/reconstruction net decomposition on `x_in` produces a low-light feature tensor `low_fea` (plus reflectance/illumination pieces internally).
 3. Normalize conditioning features for diffusion:
    - `low_condition = data_transform(low_fea)` → `[-1,1]`
 4. Diffusion sampling predicts a “better” feature tensor:
    - `pred_fea = sample_training(low_condition, betas)`
 5. Map predicted features back to `[0,1]`.
-6. CTDN reconstruction uses `pred_fea` to decode the enhanced RGB:
-   - `pred_img = CTDN(x_in, pred_fea=pred_fea)["pred_img"]`
+6. Decomposition/reconstruction net reconstruction uses `pred_fea` to decode the enhanced RGB:
+   - `pred_img = DecompositionReconstructionNet(x_in, pred_fea=pred_fea)["pred_img"]` (alias: `CTDN`)
 
 ## 4) What controls quality vs speed
 
@@ -108,8 +108,8 @@ The repo corrects this in inference loaders using `ImageOps.exif_transpose` so t
 
 ## 8) If you only read 4 files
 
-1. `models/ddm.py` — how the diffusion wrapper calls CTDN + U-Net and samples
-2. `models/decom.py` — what CTDN is producing/consuming (features in/out)
+1. `models/ddm.py` — how the diffusion wrapper calls the decomposition net + U-Net and samples
+2. `models/decom.py` — what the decomposition net is producing/consuming (features in/out)
 3. `cli_infer.py` — practical inference (padding, EXIF, OOM fallback)
 4. `app.py` — UI knobs (Quality + Blend) and auto-save behavior
 

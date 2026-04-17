@@ -9,8 +9,8 @@ It explains **what the model is**, **how data flows through it**, and **what eac
 
 **Approach:** A two-stage architecture:
 
-1. **Decomposition / Retinex stage (CTDN)** extracts low-light features and can reconstruct an image from predicted features.
-2. **Diffusion stage** predicts improved features via a diffusion sampler driven by a U-Net (`DiffusionUNet`). Those features are then decoded back to an image by CTDN.
+1. **Decomposition / Retinex stage** (`DecompositionReconstructionNet`, alias: `CTDN`) extracts low-light features and can reconstruct an image from predicted features.
+2. **Diffusion stage** predicts improved features via a diffusion sampler driven by a U-Net (`DiffusionUNet`). Those features are then decoded back to an image by `DecompositionReconstructionNet`.
 
 **Practical usage:** You typically run **stage2 inference** using `ckpt/stage2/stage2_weight.pth.tar`.
 
@@ -27,7 +27,7 @@ It explains **what the model is**, **how data flows through it**, and **what eac
 
 - `models/ddm.py` — diffusion wrapper + training + checkpoint loading
 - `models/unet.py` — diffusion U-Net backbone
-- `models/decom.py` — CTDN decomposition & reconstruction (Retinex-inspired)
+- `models/decom.py` — `DecompositionReconstructionNet` (alias: `CTDN`) decomposition & reconstruction (Retinex-inspired)
 - `models/restoration.py` — evaluation-time restoration and tiled inference fallback
 
 ### Data + utilities
@@ -65,14 +65,14 @@ This matches `DiffusionUNet`’s `in_channels` when conditional.
 
 ## 3) Architecture (what’s happening conceptually)
 
-### 3.1 CTDN (decomposition + reconstruction)
+### 3.1 DecompositionReconstructionNet (decomposition + reconstruction)
 
-CTDN is implemented in `models/decom.py` and has two main components:
+`DecompositionReconstructionNet` (alias: `CTDN`) is implemented in `models/decom.py` and has two main components:
 
-- `Retinex_decom`: estimates reflectance $R$ and illumination $L$ from features using attention.
-- `ReconNet`: builds a multi-scale feature pyramid and reconstructs the final RGB image.
+- `RetinexDecomposition` (alias: `Retinex_decom`): estimates reflectance $R$ and illumination $L$ from features using attention.
+- `ReconstructionNet` (alias: `ReconNet`): builds a multi-scale feature pyramid and reconstructs the final RGB image.
 
-CTDN is used in two modes:
+`DecompositionReconstructionNet` is used in two modes:
 
 1. **Decomposition mode** (`pred_fea is None`):
    - Takes both low and high images (6 channels)
@@ -85,11 +85,11 @@ CTDN is used in two modes:
 
 Implemented in `models/ddm.py`.
 
-- `Net` wraps:
+- `LatentRetinexDiffusionModel` (alias: `Net`) wraps:
   - `Unet` = `DiffusionUNet(config)`
-  - `decom` = `CTDN()`
+  - `decom` = `DecompositionReconstructionNet()`
 
-Sampling is performed by `Net.sample_training`, which:
+Sampling is performed by `LatentRetinexDiffusionModel.sample_training`, which:
 
 - Uses `num_diffusion_timesteps` (e.g., 1000) and `num_sampling_timesteps` (e.g., 10/20/50) from the config
 - Builds a coarse sampling schedule by skipping steps:
@@ -102,27 +102,27 @@ where $T$ is diffusion timesteps and $S$ is sampling steps.
 
 In evaluation mode, the forward pass does:
 
-1. Run CTDN decomposition to get `low_fea`.
+1. Run decomposition to get `low_fea`.
 2. Normalize `low_fea` into `[-1, 1]`.
 3. Run diffusion sampling to predict `pred_fea`.
 4. Map `pred_fea` back to `[0, 1]`.
-5. Run CTDN reconstruction to get the final enhanced image (`pred_img`).
+5. Run reconstruction to get the final enhanced image (`pred_img`).
 
 ### 3.3 Training objective
 
-In training mode, `Net.forward` produces:
+In training mode, `LatentRetinexDiffusionModel.forward` (alias: `Net.forward`) produces:
 
 - `noise_output`: predicted noise from diffusion U-Net
 - `e`: sampled Gaussian noise
 - `pred_fea`: predicted feature
 - `reference_fea`: feature target derived from the retinex decomposition
 
-Loss in `DenoisingDiffusion.noise_estimation_loss`:
+Loss in `DenoisingDiffusionPipeline.noise_estimation_loss` (alias: `DenoisingDiffusion`):
 
 - Noise MSE: $\|\hat{\epsilon} - \epsilon\|_2^2$
 - SCC feature term: $0.001 \cdot \|\texttt{pred\_fea} - \texttt{reference\_fea}\|_1$
 
-During training, CTDN parameters are frozen:
+During training, decomposition/reconstruction parameters are frozen:
 
 - Any parameter name containing `"decom"` has `requires_grad = False`.
 
@@ -178,7 +178,7 @@ If you run a neural model on independent tiles, pixels near tile edges see diffe
 Used in:
 
 - `cli_infer.py: infer_tiled`
-- `models/restoration.py: DiffusiveRestoration._restore_tiled`
+- `models/restoration.py: DiffusionRestorationPipeline._restore_tiled` (alias: `DiffusiveRestoration`)
 - `app.py: _infer_tiled`
 
 Techniques:
@@ -211,12 +211,12 @@ This repo includes:
 ## 7) Checkpoints (what gets loaded)
 
 - `ckpt/stage2/stage2_weight.pth.tar` — stage2 checkpoint used for inference
-  - Loaded via `DenoisingDiffusion.load_ddm_ckpt`
+  - Loaded via `DenoisingDiffusionPipeline.load_ddm_ckpt` (alias: `DenoisingDiffusion`)
   - Supports `nn.DataParallel` checkpoints by stripping `module.` prefixes
   - Uses `torch.load(..., map_location=device)` via `utils.logging.load_checkpoint`
 
 - `ckpt/stage1/stage1_weight.pth.tar` — used during training stage2
-  - Loaded in `Net.__init__` when `args.mode == 'training'`
+  - Loaded in `LatentRetinexDiffusionModel.__init__` when `args.mode == 'training'`
 
 ## 8) Code walkthrough (file-by-file, function-by-function)
 
@@ -231,14 +231,14 @@ This section is structured as “what it is / what it takes / what it returns”
 - `dict2namespace(config_dict)`
   - Recursively converts dict to `argparse.Namespace`.
 - `main()`
-  - Picks device, seeds RNG, creates dataset, instantiates `DenoisingDiffusion`, calls `train()`.
+  - Picks device, seeds RNG, creates dataset, instantiates `DenoisingDiffusionPipeline`, calls `train()`.
 
 #### `evaluate.py`
 
 - `parse_args_and_config()` / `dict2namespace()`
   - Same pattern as training.
 - `main()`
-  - Creates dataset loaders, instantiates `DenoisingDiffusion`, wraps with `DiffusiveRestoration`, calls `restore()`.
+  - Creates dataset loaders, instantiates `DenoisingDiffusionPipeline`, wraps with `DiffusionRestorationPipeline`, calls `restore()`.
 
 #### `cli_infer.py`
 
@@ -252,7 +252,7 @@ This section is structured as “what it is / what it takes / what it returns”
 #### `app.py`
 
 - `load_pipeline(config_path, resume_path)`
-  - Loads config, builds `DenoisingDiffusion`, loads checkpoint, caches result for the UI.
+  - Loads config, builds `DenoisingDiffusionPipeline`, loads checkpoint, caches result for the UI.
 - `make_infer_fn(config_path, resume_path)`
   - Creates the Gradio callable and implements Quality/Blend logic.
 - `_infer_tiled(...)`
@@ -282,15 +282,17 @@ This section is intentionally **very detailed** so you can explain the code line
 Purpose: convenience re-exports.
 
 - `from models.ddm import *`
-  - Makes `DenoisingDiffusion`, `Net`, etc. importable as `from models import DenoisingDiffusion`.
+  - Makes `DenoisingDiffusionPipeline`, `LatentRetinexDiffusionModel`, etc. importable as `from models import DenoisingDiffusionPipeline`.
 - `from models.restoration import *`
-  - Makes `DiffusiveRestoration` importable as `from models import DiffusiveRestoration`.
+  - Makes `DiffusionRestorationPipeline` importable as `from models import DiffusionRestorationPipeline`.
 
 #### models/ddm.py — Diffusion core + training wrapper
 
 This file defines the **stage2 diffusion pipeline**.
 
-##### Class: `EMAHelper`
+##### Class: `ExponentialMovingAverage`
+
+(Renamed for readability: `ExponentialMovingAverage` is the preferred name; `EMAHelper` remains as an alias.)
 
 Role: keeps an **Exponential Moving Average** (EMA) of model parameters for potentially smoother evaluation.
 
@@ -304,7 +306,7 @@ Role: keeps an **Exponential Moving Average** (EMA) of model parameters for pote
 
 - `update(module)`
   - For each trainable parameter: `shadow = (1-mu)*param + mu*shadow`.
-  - This is called every training step in `DenoisingDiffusion.train()`.
+  - This is called every training step in `DenoisingDiffusionPipeline.train()`.
 
 - `ema(module)`
   - Overwrites `module` parameters with the EMA values from `shadow`.
@@ -334,13 +336,15 @@ Output:
 
 - `betas`: numpy array shape `(T,)`.
 
-##### Class: `Net(nn.Module)`
+##### Class: `LatentRetinexDiffusionModel(nn.Module)`
+
+(Alias: `Net`)
 
 Role: the **actual neural network** that the diffusion wrapper trains/evaluates.
 It combines:
 
 - `self.Unet`: diffusion U-Net (`models/unet.py`)
-- `self.decom`: CTDN decomposition/reconstruction (`models/decom.py`)
+- `self.decom`: `DecompositionReconstructionNet` decomposition/reconstruction (`models/decom.py`) (alias: `CTDN`)
 
 Key expectations:
 
@@ -353,9 +357,9 @@ What it does:
 
 1. Saves `args`, `config`, and `device`.
 2. Builds `DiffusionUNet(config)`.
-3. Builds CTDN:
-   - If `args.mode == 'training'`: loads stage1 weights into CTDN via `load_stage1(...)`.
-   - Else: uses an uninitialized `CTDN()` but will later be loaded from the stage2 checkpoint via `load_ddm_ckpt()`.
+3. Builds the decomposition/reconstruction net:
+  - If `args.mode == 'training'`: loads stage1 weights into the decomposition net via `load_stage1(...)`.
+  - Else: uses an uninitialized `DecompositionReconstructionNet()` (alias: `CTDN`) but will later be loaded from the stage2 checkpoint via `load_ddm_ckpt()`.
 4. Builds diffusion `betas` with `get_beta_schedule(...)` and stores `self.num_timesteps`.
 
 Important note:
@@ -380,7 +384,7 @@ Returns:
 
 ###### `load_stage1(model, model_dir)`
 
-Role: load the stage1 CTDN checkpoint from `model_dir/stage1_weight.pth.tar` and return the model.
+Role: load the stage1 decomposition checkpoint from `model_dir/stage1_weight.pth.tar` and return the model.
 
 ###### `sample_training(x_cond, b, eta=0.)`
 
@@ -423,7 +427,7 @@ Common setup:
 
 Training branch (`self.training == True`):
 
-1. Run CTDN decomposition: `output = self.decom(inputs, pred_fea=None)`.
+1. Run decomposition: `output = self.decom(inputs, pred_fea=None)`.
 2. Extract:
    - `low_R`, `low_L`, `low_fea`, `high_L`.
 3. Conditioning tensor:
@@ -453,24 +457,26 @@ Training branch (`self.training == True`):
 
 Evaluation branch (`self.training == False`):
 
-1. Run CTDN decomposition to get `low_fea`.
+1. Run decomposition to get `low_fea`.
 2. Normalize: `low_condition_norm = utils.data_transform(low_fea)`.
 3. Sample predicted features: `pred_fea = sample_training(low_condition_norm, b)`.
 4. Map back: `pred_fea = utils.inverse_data_transform(pred_fea)`.
-5. Reconstruct RGB output using CTDN:
+5. Reconstruct RGB output using the decomposition/reconstruction net:
    - `pred_x = self.decom(inputs, pred_fea=pred_fea)["pred_img"]`.
 6. Return `{ "pred_x": pred_x }`.
 
-##### Class: `DenoisingDiffusion`
+##### Class: `DenoisingDiffusionPipeline`
 
-Role: training harness + checkpoint loader around `Net`.
+(Alias: `DenoisingDiffusion`)
+
+Role: training harness + checkpoint loader around `LatentRetinexDiffusionModel`.
 
 ###### `__init__(args, config)`
 
 Creates:
 
-- `self.model = Net(args, config)` moved to `config.device`.
-- `self.ema_helper = EMAHelper()` and registers the model.
+- `self.model = LatentRetinexDiffusionModel(args, config)` moved to `config.device`.
+- `self.ema_helper = ExponentialMovingAverage()` (alias: `EMAHelper`) and registers the model.
 - Losses: L2 (`MSELoss`) and L1 (`L1Loss`).
 - Optimizer from `utils.optimize.get_optimizer(config, model.parameters())`.
 
@@ -494,7 +500,7 @@ High-level flow:
 
 1. Builds `train_loader, val_loader = DATASET.get_loaders()`.
 2. If `args.resume` exists, loads it via `load_ddm_ckpt`.
-3. Freezes CTDN (“decom”) parameters:
+3. Freezes decomposition/reconstruction (“decom”) parameters:
    - Names containing `"decom"` → `requires_grad=False`.
 4. Main epoch/step loop:
    - `x` is moved to device.
@@ -514,7 +520,7 @@ Practical note:
 
 Inputs:
 
-- `output` dict produced by `Net.forward` in training.
+- `output` dict produced by `LatentRetinexDiffusionModel.forward` in training.
 
 Computes:
 
@@ -643,11 +649,13 @@ Architecture:
 4. Upsample path: concat current with `hs.pop()` then apply blocks.
 5. Normalize + Swish + final conv → output.
 
-#### models/decom.py — CTDN decomposition & reconstruction
+#### models/decom.py — Decomposition + reconstruction (DecompositionReconstructionNet)
 
-This file implements the Retinex-like decomposition + reconstruction network CTDN.
+This file implements the Retinex-like decomposition + reconstruction network `DecompositionReconstructionNet` (alias: `CTDN`).
 
-##### Class: `Depth_conv`
+##### Class: `DepthConv`
+
+(Alias: `Depth_conv`)
 
 Role: depthwise-separable convolution.
 
@@ -658,7 +666,9 @@ Role: depthwise-separable convolution.
 
 - Applies depthwise conv then pointwise conv.
 
-##### Class: `Res_block`
+##### Class: `ResidualBlock`
+
+(Alias: `Res_block`)
 
 Role: simple residual block.
 
@@ -669,13 +679,17 @@ Structure:
 
 `forward(x)` returns `model(x) + conv(x)`.
 
-##### Class: `upsampling`
+##### Class: `UpsamplingBlock`
+
+(Alias: `upsampling`)
 
 Role: upsample by transpose convolution.
 
 - `ConvTranspose2d(stride=2)` then LeakyReLU.
 
-##### Class: `channel_down`
+##### Class: `FeaturesToRGBHead`
+
+(Alias: `channel_down`)
 
 Role: compress features down to RGB.
 
@@ -683,13 +697,17 @@ Role: compress features down to RGB.
   - `(4C → 2C → C → 3)` with LeakyReLU between
 - Final sigmoid ensures output is in `[0,1]`.
 
-##### Class: `channel_up`
+##### Class: `RGBToFeaturesStem`
+
+(Alias: `channel_up`)
 
 Role: expand a 3-channel tensor to a high-dimensional feature tensor.
 
 - `(3 → C → 2C → 4C)` conv stack.
 
-##### Class: `feature_pyramid`
+##### Class: `FeaturePyramid`
+
+(Alias: `feature_pyramid`)
 
 Role: encode an RGB image into multi-scale feature maps.
 
@@ -702,7 +720,9 @@ Role: encode an RGB image into multi-scale feature maps.
 
 Returns `(level0, level1, level2)`.
 
-##### Class: `ReconNet`
+##### Class: `ReconstructionNet`
+
+(Alias: `ReconNet`)
 
 Role: encode low/high into deep features, and decode predicted features into an image.
 
@@ -715,18 +735,20 @@ Mode A: `pred_fea is None` (feature extraction)
 - Splits the 6-channel input into:
   - `x[:, :3]` low image
   - `x[:, 3:]` high image
-- Runs `feature_pyramid` on each, takes the deepest level.
-- Uses `channel_down` to map deep features to a 3-channel representation.
+- Runs `FeaturePyramid` on each, takes the deepest level.
+- Uses `FeaturesToRGBHead` to map deep features to a 3-channel representation.
 - Returns `(low_fea_down8, high_fea_down8)`.
 
 Mode B: `pred_fea provided` (reconstruction)
 
 - Builds pyramid features for low image.
-- Expands `pred_fea` using `channel_up`.
+- Expands `pred_fea` using `RGBToFeaturesStem`.
 - Decodes upward while adding skip connections from the pyramid.
 - Outputs `pred_img` via final conv layers.
 
-##### Class: `Self_Attention`
+##### Class: `SelfAttention`
+
+(Alias: `Self_Attention`)
 
 Role: **channel-mixing attention** within a single feature map.
 
@@ -740,13 +762,15 @@ This block is not the typical “spatial attention over $H\times W$ tokens”. I
 - The attended output is `out = attn @ v` → `(B, head, C_head, HW)` then reshaped back to `(B, C, H, W)`.
 - Final `1×1` conv projects back to `dim`.
 
-##### Class: `Cross_Attention`
+##### Class: `CrossAttention`
+
+(Alias: `Cross_Attention`)
 
 Role: cross-attention-style **channel mixing** between `hidden_states` and a context tensor `ctx`.
 
 Important implementation detail: this is not a standard “multi-head attention over flattened tokens”.
 
-- Query/Key/Value are produced by `Depth_conv` and remain 4D tensors `(B, C, H, W)`.
+- Query/Key/Value are produced by `DepthConv` and remain 4D tensors `(B, C, H, W)`.
 - `transpose_for_scores(x)` simply does `x.permute(0, 2, 1, 3)` → `(B, H, C, W)`.
   - There is no explicit reshape that splits channels into `num_heads`.
   - `num_heads` only influences the scaling term via `attention_head_size = dim / num_heads`.
@@ -755,7 +779,9 @@ Important implementation detail: this is not a standard “multi-head attention 
   - softmax over the last dim → channel-to-channel mixing per row index `H`.
 - The result is applied to `value_layer` and permuted back to `(B, C, H, W)`.
 
-##### Class: `Retinex_decom`
+##### Class: `RetinexDecomposition`
+
+(Alias: `Retinex_decom`)
 
 Role: estimate reflectance $R$ and illumination $L$ (Retinex-style).
 
@@ -774,19 +800,21 @@ Role: estimate reflectance $R$ and illumination $L$ (Retinex-style).
 
 Returns `(R, L)`.
 
-##### Class: `CTDN`
+##### Class: `DecompositionReconstructionNet`
+
+(Alias: `CTDN`)
 
 Role: top-level decomposition + reconstruction module.
 
 - Contains:
-  - `ReconNet`
-  - `Retinex_decom`
+  - `ReconstructionNet`
+  - `RetinexDecomposition`
 
 `forward(images, pred_fea=None)`:
 
 Mode A (decomposition, `pred_fea is None`):
 
-1. `ReconNet(images)` returns deep low/high features.
+1. `ReconstructionNet(images)` returns deep low/high features.
 2. Run `retinex` on both low/high features.
 3. Returns a dict:
    - `low_R`, `low_L`, `low_fea`
@@ -795,14 +823,16 @@ Mode A (decomposition, `pred_fea is None`):
 Mode B (reconstruction, `pred_fea provided`):
 
 1. Reconstruct enhanced image from the low image and predicted features:
-   - `pred_img = ReconNet(images[:, :3], pred_fea=pred_fea)`
+  - `pred_img = ReconstructionNet(images[:, :3], pred_fea=pred_fea)`
 2. Returns `{ "pred_img": pred_img }`.
 
 #### models/restoration.py — Evaluation restoration + tiled fallback
 
-This file defines `DiffusiveRestoration`, used by `evaluate.py`.
+This file defines `DiffusionRestorationPipeline` (alias: `DiffusiveRestoration`), used by `evaluate.py`.
 
-##### Class: `DiffusiveRestoration`
+##### Class: `DiffusionRestorationPipeline`
+
+(Alias: `DiffusiveRestoration`)
 
 Role: run evaluation on a DataLoader and save images to disk.
 

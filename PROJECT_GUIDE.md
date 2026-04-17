@@ -9,13 +9,13 @@ This repository contains a two-stage low-light image enhancement pipeline. In pr
 - `train.py`
   - **Purpose:** stage2 training entrypoint.
   - **Reads:** a YAML config from `configs/<name>.yml`.
-  - **Creates:** `models.DenoisingDiffusion` and calls `diffusion.train(DATASET)`.
+  - **Creates:** `models.DenoisingDiffusionPipeline` and calls `diffusion.train(dataset)`.
   - **Outputs:** periodic checkpoint files under `config.data.ckpt_dir` (see config) and validation patch images under `--image_folder`.
 
 - `evaluate.py`
   - **Purpose:** dataset-based evaluation/restoration entrypoint.
   - **Reads:** `configs/<name>.yml` + a paired validation filelist `demo_data/<val_dataset>_val.txt` (or `<data_dir>/<val_dataset>_val.txt`).
-  - **Runs:** `models.DiffusiveRestoration.restore(val_loader)`.
+  - **Runs:** `models.DiffusionRestorationPipeline.restore(val_loader)`.
   - **Outputs:** images saved under `--image_folder/<val_dataset>/...`.
 
 - `cli_infer.py`
@@ -61,20 +61,20 @@ This repository contains a two-stage low-light image enhancement pipeline. In pr
 
 - `models/ddm.py`
   - **Core of stage2**.
-  - `Net`
+  - `LatentRetinexDiffusionModel` (alias: `Net`)
     - Contains:
       - `Unet`: `models.unet.DiffusionUNet`
-      - `decom`: `models.decom.CTDN` (Retinex-like decomposition + reconstruction)
-    - In evaluation (`args.mode != 'training'`): `CTDN()` is constructed and then **its weights are loaded from the stage2 checkpoint** via `load_ddm_ckpt()`.
+      - `decom`: `models.decom.DecompositionReconstructionNet` (alias: `CTDN`) (Retinex-like decomposition + reconstruction)
+    - In evaluation (`args.mode != 'training'`): the decomposition/reconstruction net is constructed and then **its weights are loaded from the stage2 checkpoint** via `load_ddm_ckpt()`.
     - `forward(inputs)`
       - **Inputs:** typically `(B, 6, H, W)`; evaluation path uses `torch.cat([x_cond, x_cond], dim=1)` so it becomes 6 channels.
       - **Outputs:** a dict. In evaluation mode, it returns `{"pred_x": <enhanced image>}`.
-  - `DenoisingDiffusion`
+  - `DenoisingDiffusionPipeline` (alias: `DenoisingDiffusion`)
     - Wraps the model, optimizer, EMA, training loop.
     - `load_ddm_ckpt(path, ema=False)` loads `checkpoint['state_dict']` and strips `module.` prefixes if the checkpoint came from `nn.DataParallel`.
 
 - `models/restoration.py`
-  - `DiffusiveRestoration`
+  - `DiffusionRestorationPipeline` (alias: `DiffusiveRestoration`)
     - Loads the checkpoint from `args.resume` and exposes `restore(val_loader)`.
     - In `restore()`:
       - Takes the dataset tensor `x` (6-channel), uses only the first 3 channels as `x_cond`.
@@ -84,7 +84,7 @@ This repository contains a two-stage low-light image enhancement pipeline. In pr
     - **GPU note:** if the full-resolution image causes CUDA OOM, it automatically falls back to **overlapping tiled inference**.
 
 - `models/decom.py`
-  - `CTDN` (decomposition/reconstruction network)
+  - `DecompositionReconstructionNet` (alias: `CTDN`) (decomposition/reconstruction network)
     - `forward(images, pred_fea=None)` returns different outputs:
       - If `pred_fea is None`: returns decomposition features/retinex outputs (`low_R`, `low_L`, `low_fea`, `high_L`, etc.).
       - Else: returns reconstructed image in `output["pred_img"]`.
@@ -132,7 +132,17 @@ Expected checkpoint paths in this workspace:
 
 - `ckpt/stage2/stage2_weight.pth.tar`
   - Used for inference/evaluation.
-  - Contains the weights needed for stage2 inference (including the `CTDN` weights as part of the `Net` state_dict).
+  - Contains the weights needed for stage2 inference (including the decomposition/reconstruction weights as part of the model state_dict).
+
+## Note on names (backwards compatibility)
+
+This repo recently renamed several classes for readability. The old names still work as aliases, so external code won’t break:
+
+- `CTDN` → `DecompositionReconstructionNet`
+- `Net` → `LatentRetinexDiffusionModel`
+- `EMAHelper` → `ExponentialMovingAverage`
+- `DenoisingDiffusion` → `DenoisingDiffusionPipeline`
+- `DiffusiveRestoration` → `DiffusionRestorationPipeline`
 
 ## 4) How to run (copy/paste)
 
