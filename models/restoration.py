@@ -6,7 +6,7 @@ import time
 import torch.nn.functional as F
 
 
-class DiffusiveRestoration:
+class DiffusionRestorationPipeline:
     """
     Evaluation-time restoration harness. Handles checkpoint loading, full-res and tiled inference, and saving outputs.
     """
@@ -14,7 +14,7 @@ class DiffusiveRestoration:
         """
         Initializes restoration wrapper, loads checkpoint if present, sets model to eval mode.
         """
-        super(DiffusiveRestoration, self).__init__()
+        super().__init__()
         self.args = args
         self.config = config
         self.diffusion = diffusion
@@ -36,34 +36,34 @@ class DiffusiveRestoration:
 
                 # Keep the full-resolution input on CPU and only move
                 # tiles to GPU if we need a low-memory fallback.
-                x_cond_cpu = x[:, :3, :, :].contiguous()
-                _, _, h, w = x_cond_cpu.shape
+                conditioning_image_cpu = x[:, :3, :, :].contiguous()
+                _, _, height, width = conditioning_image_cpu.shape
 
                 try:
                     # Fast path: run full image on the configured device.
-                    x_cond = x_cond_cpu.to(self.diffusion.device)
-                    img_h_64 = int(64 * np.ceil(h / 64.0))
-                    img_w_64 = int(64 * np.ceil(w / 64.0))
-                    x_cond = F.pad(x_cond, (0, img_w_64 - w, 0, img_h_64 - h), 'reflect')
+                    x_cond = conditioning_image_cpu.to(self.diffusion.device)
+                    img_h_64 = int(64 * np.ceil(height / 64.0))
+                    img_w_64 = int(64 * np.ceil(width / 64.0))
+                    x_cond = F.pad(x_cond, (0, img_w_64 - width, 0, img_h_64 - height), 'reflect')
 
-                    t1 = time.time()
-                    pred_x = self.diffusion.model(torch.cat((x_cond, x_cond), dim=1))["pred_x"][:, :, :h, :w]
-                    t2 = time.time()
+                    start_time = time.time()
+                    pred_x = self.diffusion.model(torch.cat((x_cond, x_cond), dim=1))["pred_x"][:, :, :height, :width]
+                    end_time = time.time()
                 except torch.OutOfMemoryError:
                     if self.diffusion.device.type != "cuda":
                         raise
 
                     torch.cuda.empty_cache()
                     print(
-                        f"CUDA OOM on full-res {h}x{w}; falling back to tiled inference...",
+                        f"CUDA OOM on full-res {height}x{width}; falling back to tiled inference...",
                         flush=True,
                     )
-                    t1 = time.time()
-                    pred_x = self._restore_tiled(x_cond_cpu, h=h, w=w)
-                    t2 = time.time()
+                    start_time = time.time()
+                    pred_x = self._restore_tiled(conditioning_image_cpu, h=height, w=width)
+                    end_time = time.time()
 
                 utils.logging.save_image(pred_x, os.path.join(image_folder, f"{y[0]}"))
-                print(f"processing image {y[0]}, time={t2 - t1}")
+                print(f"processing image {y[0]}, time={end_time - start_time}")
 
     def _restore_tiled(self, x_cond_cpu: torch.Tensor, *, h: int, w: int) -> torch.Tensor:
         """
@@ -95,12 +95,12 @@ class DiffusiveRestoration:
 
         context = max(64, overlap // 2)
 
-        b = x_cond_cpu.shape[0]
+        batch_size = x_cond_cpu.shape[0]
 
         for tile_size in tile_sizes:
             stride = max(64, tile_size - overlap)
             try:
-                out = torch.zeros((b, 3, h, w), dtype=torch.float32)
+                out = torch.zeros((batch_size, 3, h, w), dtype=torch.float32)
                 weight = torch.zeros((1, 1, h, w), dtype=torch.float32)
 
                 ys = list(range(0, h, stride))
@@ -155,6 +155,10 @@ class DiffusiveRestoration:
                 print(f"Still OOM with tile_size={tile_size}; trying smaller tiles...", flush=True)
 
         raise torch.OutOfMemoryError("Unable to run tiled inference within GPU memory limits.")
+
+
+# Backwards-compatible alias
+DiffusiveRestoration = DiffusionRestorationPipeline
 
 
 

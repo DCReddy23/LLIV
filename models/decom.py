@@ -10,12 +10,12 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 
-class Depth_conv(nn.Module):
+class DepthConv(nn.Module):
     """
     Depthwise separable convolution: spatial conv per channel, then 1x1 conv to mix channels.
     """
     def __init__(self, in_ch, out_ch):
-        super(Depth_conv, self).__init__()
+        super().__init__()
         self.depth_conv = nn.Conv2d(
             in_channels=in_ch,
             out_channels=in_ch,
@@ -34,42 +34,42 @@ class Depth_conv(nn.Module):
         )
 
     def forward(self, input):
-        out = self.depth_conv(input)
-        out = self.point_conv(out)
-        return out
+        output = self.depth_conv(input)
+        output = self.point_conv(output)
+        return output
 
 
-class Res_block(nn.Module):
+class ResidualBlock(nn.Module):
     """
     Simple residual block: two 3x3 convs with LeakyReLU, plus 1x1 shortcut.
     """
     def __init__(self, in_channels, out_channels):
-        super(Res_block, self).__init__()
+        super().__init__()
 
-        sequence = []
+        layers = []
 
-        sequence += [
+        layers += [
             nn.Conv2d(in_channels, out_channels, kernel_size=(3, 3), stride=(1, 1), padding=1),
             nn.LeakyReLU(),
             nn.Conv2d(out_channels, out_channels, kernel_size=(3, 3), stride=(1, 1), padding=1)
         ]
 
-        self.model = nn.Sequential(*sequence)
+        self.model = nn.Sequential(*layers)
 
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=(1, 1), stride=(1, 1), padding=0)
 
     def forward(self, x):
-        out = self.model(x) + self.conv(x)
+        output = self.model(x) + self.conv(x)
 
-        return out
+        return output
 
 
-class upsampling(nn.Module):
+class UpsamplingBlock(nn.Module):
     """
     Upsampling block: ConvTranspose2d + LeakyReLU.
     """
     def __init__(self, in_channels, out_channels):
-        super(upsampling, self).__init__()
+        super().__init__()
 
         self.conv = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1,
                                                   output_padding=1)
@@ -77,16 +77,16 @@ class upsampling(nn.Module):
         self.relu = nn.LeakyReLU()
 
     def forward(self, x):
-        out = self.relu(self.conv(x))
-        return out
+        output = self.relu(self.conv(x))
+        return output
 
 
-class channel_down(nn.Module):
+class FeaturesToRGBHead(nn.Module):
     """
     Reduces feature channels to 3 (RGB) via conv stack and sigmoid.
     """
     def __init__(self, channels):
-        super(channel_down, self).__init__()
+        super().__init__()
 
         self.conv0 = nn.Conv2d(channels * 4, channels * 2, kernel_size=(3, 3), stride=(1, 1), padding=1)
         self.conv1 = nn.Conv2d(channels * 2, channels, kernel_size=(3, 3), stride=(1, 1), padding=1)
@@ -95,17 +95,17 @@ class channel_down(nn.Module):
         self.relu = nn.LeakyReLU()
 
     def forward(self, x):
-        out = torch.sigmoid(self.conv2(self.relu(self.conv1(self.relu(self.conv0(x))))))
+        output = torch.sigmoid(self.conv2(self.relu(self.conv1(self.relu(self.conv0(x))))))
 
-        return out
+        return output
 
 
-class channel_up(nn.Module):
+class RGBToFeaturesStem(nn.Module):
     """
     Expands 3-channel input to high-dimensional feature tensor via conv stack.
     """
     def __init__(self, channels):
-        super(channel_up, self).__init__()
+        super().__init__()
 
         self.conv0 = nn.Conv2d(3, channels, kernel_size=(3, 3), stride=(1, 1), padding=1)
         self.conv1 = nn.Conv2d(channels, channels * 2, kernel_size=(3, 3), stride=(1, 1), padding=1)
@@ -114,31 +114,31 @@ class channel_up(nn.Module):
         self.relu = nn.LeakyReLU()
 
     def forward(self, x):
-        out = self.conv2(self.relu(self.conv1(self.relu(self.conv0(x)))))
+        output = self.conv2(self.relu(self.conv1(self.relu(self.conv0(x)))))
 
-        return out
+        return output
 
 
-class feature_pyramid(nn.Module):
+class FeaturePyramid(nn.Module):
     """
     Builds multi-scale feature pyramid from input image.
     Returns three levels of features.
     """
     def __init__(self, channels):
-        super(feature_pyramid, self).__init__()
+        super().__init__()
 
         self.convs = nn.Sequential(nn.Conv2d(3, channels, kernel_size=(5, 5), stride=(1, 1), padding=2),
                                    nn.Conv2d(channels, channels, kernel_size=(5, 5), stride=(1, 1), padding=2))
 
-        self.block0 = Res_block(channels, channels)
+        self.block0 = ResidualBlock(channels, channels)
 
         self.down0 = nn.Conv2d(channels, channels, kernel_size=(3, 3), stride=(2, 2), padding=1)
 
-        self.block1 = Res_block(channels, channels * 2)
+        self.block1 = ResidualBlock(channels, channels * 2)
 
         self.down1 = nn.Conv2d(channels * 2, channels * 2, kernel_size=(3, 3), stride=(2, 2), padding=1)
 
-        self.block2 = Res_block(channels * 2, channels * 4)
+        self.block2 = ResidualBlock(channels * 2, channels * 4)
 
         self.down2 = nn.Conv2d(channels * 4, channels * 4, kernel_size=(3, 3), stride=(2, 2), padding=1)
 
@@ -153,29 +153,29 @@ class feature_pyramid(nn.Module):
         return level0, level1, level2
 
 
-class ReconNet(nn.Module):
+class ReconstructionNet(nn.Module):
     """
     Encoder-decoder for feature extraction and image reconstruction.
     If pred_fea is None: extracts features from low/high images.
     If pred_fea is given: decodes features to RGB image.
     """
     def __init__(self, channels):
-        super(ReconNet, self).__init__()
+        super().__init__()
 
-        self.pyramid = feature_pyramid(channels)
+        self.pyramid = FeaturePyramid(channels)
 
-        self.channel_down = channel_down(channels)
-        self.channel_up = channel_up(channels)
+        self.channel_down = FeaturesToRGBHead(channels)
+        self.channel_up = RGBToFeaturesStem(channels)
 
-        self.block_up0 = Res_block(channels * 4, channels * 4)
-        self.block_up1 = Res_block(channels * 4, channels * 4)
-        self.up_sampling0 = upsampling(channels * 4, channels * 2)
-        self.block_up2 = Res_block(channels * 2, channels * 2)
-        self.block_up3 = Res_block(channels * 2, channels * 2)
-        self.up_sampling1 = upsampling(channels * 2, channels)
-        self.block_up4 = Res_block(channels, channels)
-        self.block_up5 = Res_block(channels, channels)
-        self.up_sampling2 = upsampling(channels, channels)
+        self.block_up0 = ResidualBlock(channels * 4, channels * 4)
+        self.block_up1 = ResidualBlock(channels * 4, channels * 4)
+        self.up_sampling0 = UpsamplingBlock(channels * 4, channels * 2)
+        self.block_up2 = ResidualBlock(channels * 2, channels * 2)
+        self.block_up3 = ResidualBlock(channels * 2, channels * 2)
+        self.up_sampling1 = UpsamplingBlock(channels * 2, channels)
+        self.block_up4 = ResidualBlock(channels, channels)
+        self.block_up5 = ResidualBlock(channels, channels)
+        self.up_sampling2 = UpsamplingBlock(channels, channels)
 
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=(3, 3), stride=(1, 1), padding=1)
         self.conv3 = nn.Conv2d(channels, 3, kernel_size=(1, 1), stride=(1, 1), padding=0)
@@ -210,12 +210,12 @@ class ReconNet(nn.Module):
             return pred_img
 
 
-class Self_Attention(nn.Module):
+class SelfAttention(nn.Module):
     """
     Channel-mixing self-attention block (not standard spatial attention).
     """
     def __init__(self, dim, num_heads, bias):
-        super(Self_Attention, self).__init__()
+        super().__init__()
         self.num_heads = num_heads
         self.qkv = nn.Conv2d(dim, dim * 3, kernel_size=(1, 1), bias=bias)
         self.qkv_dwconv = nn.Conv2d(dim * 3, dim * 3, kernel_size=(3, 3), stride=(1, 1),
@@ -223,10 +223,10 @@ class Self_Attention(nn.Module):
         self.project_out = nn.Conv2d(dim, dim, kernel_size=(1, 1), bias=bias)
 
     def forward(self, x):
-        b, c, h, w = x.shape
+        batch_size, channels, height, width = x.shape
 
-        qkv = self.qkv_dwconv(self.qkv(x))
-        q, k, v = qkv.chunk(3, dim=1)
+        qkv_tensor = self.qkv_dwconv(self.qkv(x))
+        q, k, v = qkv_tensor.chunk(3, dim=1)
 
         q = rearrange(q, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
         k = rearrange(k, 'b (head c) h w -> b head c (h w)', head=self.num_heads)
@@ -235,23 +235,29 @@ class Self_Attention(nn.Module):
         q = torch.nn.functional.normalize(q, dim=-1)
         k = torch.nn.functional.normalize(k, dim=-1)
 
-        attn = (q @ k.transpose(-2, -1))
-        attn = attn.softmax(dim=-1)
+        attention_weights = (q @ k.transpose(-2, -1))
+        attention_weights = attention_weights.softmax(dim=-1)
 
-        out = (attn @ v)
+        attended = (attention_weights @ v)
 
-        out = rearrange(out, 'b head c (h w) -> b (head c) h w', head=self.num_heads, h=h, w=w)
+        attended = rearrange(
+            attended,
+            'b head c (h w) -> b (head c) h w',
+            head=self.num_heads,
+            h=height,
+            w=width,
+        )
 
-        out = self.project_out(out)
-        return out
+        attended = self.project_out(attended)
+        return attended
 
 
-class Cross_Attention(nn.Module):
+class CrossAttention(nn.Module):
     """
     Channel-mixing cross-attention between hidden_states and context tensor.
     """
     def __init__(self, dim, num_heads, dropout=0.):
-        super(Cross_Attention, self).__init__()
+        super().__init__()
         if dim % num_heads != 0:
             raise ValueError(
                 "The hidden size (%d) is not a multiple of the number of attention "
@@ -260,9 +266,9 @@ class Cross_Attention(nn.Module):
         self.num_heads = num_heads
         self.attention_head_size = int(dim / num_heads)
 
-        self.query = Depth_conv(in_ch=dim, out_ch=dim)
-        self.key = Depth_conv(in_ch=dim, out_ch=dim)
-        self.value = Depth_conv(in_ch=dim, out_ch=dim)
+        self.query = DepthConv(in_ch=dim, out_ch=dim)
+        self.key = DepthConv(in_ch=dim, out_ch=dim)
+        self.value = DepthConv(in_ch=dim, out_ch=dim)
 
         self.dropout = nn.Dropout(dropout)
 
@@ -278,13 +284,13 @@ class Cross_Attention(nn.Module):
         return x.permute(0, 2, 1, 3)
 
     def forward(self, hidden_states, ctx):
-        mixed_query_layer = self.query(hidden_states)
-        mixed_key_layer = self.key(ctx)
-        mixed_value_layer = self.value(ctx)
+        query_features = self.query(hidden_states)
+        key_features = self.key(ctx)
+        value_features = self.value(ctx)
 
-        query_layer = self.transpose_for_scores(mixed_query_layer)
-        key_layer = self.transpose_for_scores(mixed_key_layer)
-        value_layer = self.transpose_for_scores(mixed_value_layer)
+        query_layer = self.transpose_for_scores(query_features)
+        key_layer = self.transpose_for_scores(key_features)
+        value_layer = self.transpose_for_scores(value_features)
 
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
@@ -293,67 +299,69 @@ class Cross_Attention(nn.Module):
 
         attention_probs = self.dropout(attention_probs)
 
-        ctx_layer = torch.matmul(attention_probs, value_layer)
-        ctx_layer = ctx_layer.permute(0, 2, 1, 3).contiguous()
+        context_layer = torch.matmul(attention_probs, value_layer)
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
 
-        return ctx_layer
+        return context_layer
 
 
-class Retinex_decom(nn.Module):
+class RetinexDecomposition(nn.Module):
     """
     Retinex-style decomposition: estimates reflectance and illumination from features using attention.
     """
     def __init__(self, channels):
-        super(Retinex_decom, self).__init__()
+        super().__init__()
 
         self.conv0 = nn.Conv2d(3, channels, kernel_size=(3, 3), stride=(1, 1), padding=1)
-        self.blocks0 = nn.Sequential(Res_block(channels, channels),
-                                     Res_block(channels, channels))
+        self.blocks0 = nn.Sequential(ResidualBlock(channels, channels),
+                         ResidualBlock(channels, channels))
 
         self.conv1 = nn.Conv2d(1, channels, kernel_size=(3, 3), stride=(1, 1), padding=1)
-        self.blocks1 = nn.Sequential(Res_block(channels, channels),
-                                     Res_block(channels, channels))
+        self.blocks1 = nn.Sequential(ResidualBlock(channels, channels),
+                         ResidualBlock(channels, channels))
 
-        self.cross_attention = Cross_Attention(dim=channels, num_heads=8)
-        self.self_attention = Self_Attention(dim=channels, num_heads=8, bias=True)
+        self.cross_attention = CrossAttention(dim=channels, num_heads=8)
+        self.self_attention = SelfAttention(dim=channels, num_heads=8, bias=True)
 
-        self.conv0_1 = nn.Sequential(Res_block(channels, channels),
+        self.conv0_1 = nn.Sequential(ResidualBlock(channels, channels),
                                      nn.Conv2d(channels, 3, kernel_size=(3, 3), stride=(1, 1), padding=1))
-        self.conv1_1 = nn.Sequential(Res_block(channels, channels),
+        self.conv1_1 = nn.Sequential(ResidualBlock(channels, channels),
                                      nn.Conv2d(channels, 1, kernel_size=(3, 3), stride=(1, 1), padding=1))
 
     def forward(self, x):
-        init_illumination = torch.max(x, dim=1, keepdim=True)[0]
-        init_reflectance = x / init_illumination
+        initial_illumination = torch.max(x, dim=1, keepdim=True)[0]
+        initial_reflectance = x / initial_illumination
 
-        Reflectance, Illumination = (self.blocks0(self.conv0(init_reflectance)),
-                                     self.blocks1(self.conv1(init_illumination)))
+        reflectance_features, illumination_features = (
+            self.blocks0(self.conv0(initial_reflectance)),
+            self.blocks1(self.conv1(initial_illumination)),
+        )
 
-        Reflectance_final = self.cross_attention(Illumination, Reflectance)
+        reflectance_attended = self.cross_attention(illumination_features, reflectance_features)
 
-        Illumination_content = self.self_attention(Illumination)
+        illumination_content = self.self_attention(illumination_features)
 
-        Reflectance_final = self.conv0_1(Reflectance_final + Illumination_content)
-        Illumination_final = self.conv1_1(Illumination - Illumination_content)
+        reflectance_attended = self.conv0_1(reflectance_attended + illumination_content)
+        illumination_final = self.conv1_1(illumination_features - illumination_content)
 
-        R = torch.sigmoid(Reflectance_final)
-        L = torch.sigmoid(Illumination_final)
-        L = torch.cat([L for i in range(3)], dim=1)
+        reflectance = torch.sigmoid(reflectance_attended)
+        illumination = torch.sigmoid(illumination_final)
+        illumination = torch.cat([illumination for _ in range(3)], dim=1)
 
-        return R, L
+        return reflectance, illumination
 
 
-class CTDN(nn.Module):
+class DecompositionReconstructionNet(nn.Module):
     """
     Top-level decomposition + reconstruction module.
     If pred_fea is None: decomposes low/high images to features and retinex outputs.
     If pred_fea is given: reconstructs enhanced image from low + features.
     """
     def __init__(self, channels=64):
-        super(CTDN, self).__init__()
+        super().__init__()
 
-        self.ReconNet = ReconNet(channels)
-        self.retinex = Retinex_decom(channels)
+        self.ReconNet = ReconstructionNet(channels)
+        self.retinex = RetinexDecomposition(channels)
 
     def forward(self, images, pred_fea=None):
 
@@ -377,3 +385,17 @@ class CTDN(nn.Module):
             output["pred_img"] = pred_img
 
         return output
+
+
+# Backwards-compatible aliases (old names are kept so existing imports keep working).
+Depth_conv = DepthConv
+Res_block = ResidualBlock
+upsampling = UpsamplingBlock
+channel_down = FeaturesToRGBHead
+channel_up = RGBToFeaturesStem
+Self_Attention = SelfAttention
+Cross_Attention = CrossAttention
+Retinex_decom = RetinexDecomposition
+feature_pyramid = FeaturePyramid
+ReconNet = ReconstructionNet
+CTDN = DecompositionReconstructionNet

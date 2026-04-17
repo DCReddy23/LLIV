@@ -23,15 +23,16 @@ def get_timestep_embedding(timesteps, embedding_dim):
     """
     assert len(timesteps.shape) == 1
 
-    half_dim = embedding_dim // 2
-    emb = math.log(10000) / (half_dim - 1)
-    emb = torch.exp(torch.arange(half_dim, dtype=torch.float32) * -emb)
-    emb = emb.to(device=timesteps.device)
-    emb = timesteps.float()[:, None] * emb[None, :]
-    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+    half_embedding_dim = embedding_dim // 2
+    frequency_log_scale = math.log(10000) / (half_embedding_dim - 1)
+    frequencies = torch.exp(torch.arange(half_embedding_dim, dtype=torch.float32) * -frequency_log_scale)
+    frequencies = frequencies.to(device=timesteps.device)
+
+    angular_speeds = timesteps.float()[:, None] * frequencies[None, :]
+    embedding = torch.cat([torch.sin(angular_speeds), torch.cos(angular_speeds)], dim=1)
     if embedding_dim % 2 == 1:  # zero pad
-        emb = torch.nn.functional.pad(emb, (0, 1, 0, 0))
-    return emb
+        embedding = torch.nn.functional.pad(embedding, (0, 1, 0, 0))
+    return embedding
 
 
 def nonlinearity(x):
@@ -88,8 +89,8 @@ class Downsample(nn.Module):
 
     def forward(self, x):
         if self.with_conv:
-            pad = (0, 1, 0, 1)
-            x = torch.nn.functional.pad(x, pad, mode="constant", value=0)
+            padding = (0, 1, 0, 1)
+            x = torch.nn.functional.pad(x, padding, mode="constant", value=0)
             x = self.conv(x)
         else:
             x = torch.nn.functional.avg_pool2d(x, kernel_size=2, stride=2)
@@ -138,17 +139,17 @@ class ResnetBlock(nn.Module):
                                                     padding=0)
 
     def forward(self, x, temb):
-        h = x
-        h = self.norm1(h)
-        h = nonlinearity(h)
-        h = self.conv1(h)
+        hidden = x
+        hidden = self.norm1(hidden)
+        hidden = nonlinearity(hidden)
+        hidden = self.conv1(hidden)
 
-        h = h + self.temb_proj(nonlinearity(temb))[:, :, None, None]
+        hidden = hidden + self.temb_proj(nonlinearity(temb))[:, :, None, None]
 
-        h = self.norm2(h)
-        h = nonlinearity(h)
-        h = self.dropout(h)
-        h = self.conv2(h)
+        hidden = self.norm2(hidden)
+        hidden = nonlinearity(hidden)
+        hidden = self.dropout(hidden)
+        hidden = self.conv2(hidden)
 
         if self.in_channels != self.out_channels:
             if self.use_conv_shortcut:
@@ -156,7 +157,7 @@ class ResnetBlock(nn.Module):
             else:
                 x = self.nin_shortcut(x)
 
-        return x+h
+        return x + hidden
 
 
 class AttnBlock(nn.Module):
@@ -190,31 +191,31 @@ class AttnBlock(nn.Module):
                                         padding=0)
 
     def forward(self, x):
-        h_ = x
-        h_ = self.norm(h_)
-        q = self.q(h_)
-        k = self.k(h_)
-        v = self.v(h_)
+        normalized_features = x
+        normalized_features = self.norm(normalized_features)
+        q = self.q(normalized_features)
+        k = self.k(normalized_features)
+        v = self.v(normalized_features)
 
         # compute attention
         b, c, h, w = q.shape
         q = q.reshape(b, c, h*w)
         q = q.permute(0, 2, 1)   # b,hw,c
         k = k.reshape(b, c, h*w)  # b,c,hw
-        w_ = torch.bmm(q, k)     # b,hw,hw    w[b,i,j]=sum_c q[b,i,c]k[b,c,j]
-        w_ = w_ * (int(c)**(-0.5))
-        w_ = torch.nn.functional.softmax(w_, dim=2)
+        attention_weights = torch.bmm(q, k)     # b,hw,hw
+        attention_weights = attention_weights * (int(c) ** (-0.5))
+        attention_weights = torch.nn.functional.softmax(attention_weights, dim=2)
 
         # attend to values
         v = v.reshape(b, c, h*w)
-        w_ = w_.permute(0, 2, 1)   # b,hw,hw (first hw of k, second of q)
+        attention_weights = attention_weights.permute(0, 2, 1)   # b,hw,hw
         # b, c,hw (hw of q) h_[b,c,j] = sum_i v[b,c,i] w_[b,i,j]
-        h_ = torch.bmm(v, w_)
-        h_ = h_.reshape(b, c, h, w)
+        attended_features = torch.bmm(v, attention_weights)
+        attended_features = attended_features.reshape(b, c, h, w)
 
-        h_ = self.proj_out(h_)
+        attended_features = self.proj_out(attended_features)
 
-        return x+h_
+        return x + attended_features
 
 
 class DiffusionUNet(nn.Module):
@@ -327,40 +328,40 @@ class DiffusionUNet(nn.Module):
         # assert x.shape[2] == x.shape[3] == self.resolution
 
         # timestep embedding
-        temb = get_timestep_embedding(t, self.ch)
-        temb = self.temb.dense[0](temb)
-        temb = nonlinearity(temb)
-        temb = self.temb.dense[1](temb)
+        timestep_embedding = get_timestep_embedding(t, self.ch)
+        timestep_embedding = self.temb.dense[0](timestep_embedding)
+        timestep_embedding = nonlinearity(timestep_embedding)
+        timestep_embedding = self.temb.dense[1](timestep_embedding)
 
         # downsampling
-        hs = [self.conv_in(x)]
+        skip_connections = [self.conv_in(x)]
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
-                h = self.down[i_level].block[i_block](hs[-1], temb)
+                hidden_states = self.down[i_level].block[i_block](skip_connections[-1], timestep_embedding)
                 if len(self.down[i_level].attn) > 0:
-                    h = self.down[i_level].attn[i_block](h)
-                hs.append(h)
+                    hidden_states = self.down[i_level].attn[i_block](hidden_states)
+                skip_connections.append(hidden_states)
             if i_level != self.num_resolutions-1:
-                hs.append(self.down[i_level].downsample(hs[-1]))
+                skip_connections.append(self.down[i_level].downsample(skip_connections[-1]))
 
         # middle
-        h = hs[-1]
-        h = self.mid.block_1(h, temb)
-        h = self.mid.attn_1(h)
-        h = self.mid.block_2(h, temb)
+        hidden_states = skip_connections[-1]
+        hidden_states = self.mid.block_1(hidden_states, timestep_embedding)
+        hidden_states = self.mid.attn_1(hidden_states)
+        hidden_states = self.mid.block_2(hidden_states, timestep_embedding)
 
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks+1):
-                h = self.up[i_level].block[i_block](
-                    torch.cat([h, hs.pop()], dim=1), temb)
+                hidden_states = self.up[i_level].block[i_block](
+                    torch.cat([hidden_states, skip_connections.pop()], dim=1), timestep_embedding)
                 if len(self.up[i_level].attn) > 0:
-                    h = self.up[i_level].attn[i_block](h)
+                    hidden_states = self.up[i_level].attn[i_block](hidden_states)
             if i_level != 0:
-                h = self.up[i_level].upsample(h)
+                hidden_states = self.up[i_level].upsample(hidden_states)
 
         # end
-        h = self.norm_out(h)
-        h = nonlinearity(h)
-        h = self.conv_out(h)
-        return h
+        hidden_states = self.norm_out(hidden_states)
+        hidden_states = nonlinearity(hidden_states)
+        hidden_states = self.conv_out(hidden_states)
+        return hidden_states

@@ -11,7 +11,7 @@ import yaml
 from PIL import Image, ImageOps
 from torchvision.transforms import functional as TF
 
-from models import DenoisingDiffusion
+from models import DenoisingDiffusionPipeline
 
 
 def dict2namespace(config: dict) -> argparse.Namespace:
@@ -26,29 +26,29 @@ def dict2namespace(config: dict) -> argparse.Namespace:
 
 def _pad_to_64(x: torch.Tensor) -> tuple[torch.Tensor, int, int]:
     """Pad BCHW tensor with reflect padding to multiples of 64."""
-    _, _, h, w = x.shape
-    img_h_64 = int(64 * ((h + 63) // 64))
-    img_w_64 = int(64 * ((w + 63) // 64))
-    x = F.pad(x, (0, img_w_64 - w, 0, img_h_64 - h), mode="reflect")
-    return x, h, w
+    _, _, height, width = x.shape
+    padded_height_64 = int(64 * ((height + 63) // 64))
+    padded_width_64 = int(64 * ((width + 63) // 64))
+    x = F.pad(x, (0, padded_width_64 - width, 0, padded_height_64 - height), mode="reflect")
+    return x, height, width
 
 
 def _hann_window_2d(h: int, w: int) -> torch.Tensor:
-    wy = torch.hann_window(h, periodic=False)
-    wx = torch.hann_window(w, periodic=False)
-    return (wy[:, None] * wx[None, :]).clamp(min=1e-6)
+    window_y = torch.hann_window(h, periodic=False)
+    window_x = torch.hann_window(w, periodic=False)
+    return (window_y[:, None] * window_x[None, :]).clamp(min=1e-6)
 
 
 def _blend_window_2d(h: int, w: int, *, power: int) -> torch.Tensor:
-    win = _hann_window_2d(h, w)
+    window = _hann_window_2d(h, w)
     if power <= 1:
-        return win
-    return win**power
+        return window
+    return window**power
 
 
 @torch.no_grad()
 def _infer_tiled(
-    diffusion: DenoisingDiffusion,
+    diffusion: DenoisingDiffusionPipeline,
     x_cond_cpu: torch.Tensor,
     *,
     tile_sizes: list[int] | None = None,
@@ -58,7 +58,7 @@ def _infer_tiled(
 ) -> torch.Tensor:
     """Overlapping tiled inference. Returns CPU tensor (1,3,H,W)."""
 
-    _, _, H, W = x_cond_cpu.shape
+    _, _, height, width = x_cond_cpu.shape
 
     if tile_sizes is None:
         # Try larger tiles first for speed; fall back on OOM.
@@ -71,52 +71,52 @@ def _infer_tiled(
     for tile_size in tile_sizes:
         stride = max(64, tile_size - overlap)
         try:
-            out = torch.zeros((1, 3, H, W), dtype=torch.float32)
-            weight = torch.zeros((1, 1, H, W), dtype=torch.float32)
+            output = torch.zeros((1, 3, height, width), dtype=torch.float32)
+            weight_map = torch.zeros((1, 1, height, width), dtype=torch.float32)
 
-            ys = list(range(0, H, stride))
-            xs = list(range(0, W, stride))
-            if ys[-1] + tile_size < H:
-                ys.append(H - tile_size)
-            if xs[-1] + tile_size < W:
-                xs.append(W - tile_size)
-            ys = sorted(set(max(0, y0) for y0 in ys))
-            xs = sorted(set(max(0, x0) for x0 in xs))
+            y_starts = list(range(0, height, stride))
+            x_starts = list(range(0, width, stride))
+            if y_starts[-1] + tile_size < height:
+                y_starts.append(height - tile_size)
+            if x_starts[-1] + tile_size < width:
+                x_starts.append(width - tile_size)
+            y_starts = sorted(set(max(0, y0) for y0 in y_starts))
+            x_starts = sorted(set(max(0, x0) for x0 in x_starts))
 
-            for y0 in ys:
-                for x0 in xs:
-                    y1 = min(H, y0 + tile_size)
-                    x1 = min(W, x0 + tile_size)
+            for y0 in y_starts:
+                for x0 in x_starts:
+                    y1 = min(height, y0 + tile_size)
+                    x1 = min(width, x0 + tile_size)
 
                     y0e = max(0, y0 - context)
                     x0e = max(0, x0 - context)
-                    y1e = min(H, y1 + context)
-                    x1e = min(W, x1 + context)
+                    y1e = min(height, y1 + context)
+                    x1e = min(width, x1 + context)
 
-                    tile = x_cond_cpu[:, :, y0e:y1e, x0e:x1e].to(diffusion.device)
-                    tile, th, tw = _pad_to_64(tile)
+                    tile_tensor = x_cond_cpu[:, :, y0e:y1e, x0e:x1e].to(diffusion.device)
+                    tile_tensor, tile_height, tile_width = _pad_to_64(tile_tensor)
 
-                    pred = diffusion.model(torch.cat([tile, tile], dim=1))["pred_x"][:, :, :th, :tw]
-                    pred_cpu = pred.detach().cpu()
+                    prediction = diffusion.model(torch.cat([tile_tensor, tile_tensor], dim=1))["pred_x"][:, :, :tile_height, :tile_width]
+                    prediction_cpu = prediction.detach().cpu()
 
-                    cy0 = y0 - y0e
-                    cx0 = x0 - x0e
-                    cy1 = cy0 + (y1 - y0)
-                    cx1 = cx0 + (x1 - x0)
-                    pred_crop = pred_cpu[:, :, cy0:cy1, cx0:cx1]
+                    crop_y0 = y0 - y0e
+                    crop_x0 = x0 - x0e
+                    crop_y1 = crop_y0 + (y1 - y0)
+                    crop_x1 = crop_x0 + (x1 - x0)
+                    prediction_crop = prediction_cpu[:, :, crop_y0:crop_y1, crop_x0:crop_x1]
 
                     out_h = y1 - y0
                     out_w = x1 - x0
                     key = (out_h, out_w)
-                    win = window_cache.get(key)
-                    if win is None:
-                        win = _blend_window_2d(out_h, out_w, power=window_power).unsqueeze(0).unsqueeze(0)
-                        window_cache[key] = win
+                    blend_window = window_cache.get(key)
+                    if blend_window is None:
+                        blend_window = _blend_window_2d(out_h, out_w, power=window_power).unsqueeze(0).unsqueeze(0)
+                        window_cache[key] = blend_window
 
-                    out[:, :, y0:y1, x0:x1] += pred_crop * win
-                    weight[:, :, y0:y1, x0:x1] += win
+                    output[:, :, y0:y1, x0:x1] += prediction_crop * blend_window
+                    weight_map[:, :, y0:y1, x0:x1] += blend_window
 
-            return (out / weight).clamp(0, 1)
+            return (output / weight_map).clamp(0, 1)
         except torch.OutOfMemoryError:
             if diffusion.device.type != "cuda":
                 raise
@@ -143,7 +143,7 @@ def load_pipeline(config_path: str, resume_path: str):
     print(f"Using device: {device}", flush=True)
 
     args = argparse.Namespace(mode="evaluation", resume=resume_path, image_folder="results/")
-    diffusion = DenoisingDiffusion(args, config)
+    diffusion = DenoisingDiffusionPipeline(args, config)
     diffusion.load_ddm_ckpt(resume_path, ema=False)
     diffusion.model.eval()
 
@@ -213,41 +213,41 @@ def make_infer_fn(config_path: str, resume_path: str):
         # Fix common phone-photo orientation issues.
         input_image = ImageOps.exif_transpose(input_image).convert("RGB")
 
-        x_cond_cpu = TF.to_tensor(input_image).unsqueeze(0)  # 1x3xHxW in [0,1]
-        _, _, h, w = x_cond_cpu.shape
+        conditioning_tensor_cpu = TF.to_tensor(input_image).unsqueeze(0)  # 1x3xHxW in [0,1]
+        _, _, height, width = conditioning_tensor_cpu.shape
 
         try:
-            x_cond = x_cond_cpu.to(device)
-            x_cond, _, _ = _pad_to_64(x_cond)
+            conditioning_tensor = conditioning_tensor_cpu.to(device)
+            conditioning_tensor, _, _ = _pad_to_64(conditioning_tensor)
 
             # Model expects 6-channel input (low + high). For inference we reuse low as both.
-            model_in = torch.cat([x_cond, x_cond], dim=1)
-            pred_x = diffusion.model(model_in)["pred_x"][0, :, :h, :w].detach().cpu().clamp(0, 1)
+            model_input = torch.cat([conditioning_tensor, conditioning_tensor], dim=1)
+            predicted_tensor = diffusion.model(model_input)["pred_x"][0, :, :height, :width].detach().cpu().clamp(0, 1)
         except torch.OutOfMemoryError:
             if device.type != "cuda":
                 raise
             torch.cuda.empty_cache()
-            print(f"UI: CUDA OOM on full-res {h}x{w}; using tiled inference...", flush=True)
-            pred_x = _infer_tiled(
+            print(f"UI: CUDA OOM on full-res {height}x{width}; using tiled inference...", flush=True)
+            predicted_tensor = _infer_tiled(
                 diffusion,
-                x_cond_cpu,
+                conditioning_tensor_cpu,
                 tile_sizes=tile_sizes,
                 overlap=overlap,
                 context=context,
                 window_power=window_power,
             )[0, :, :, :]
 
-        out_img = TF.to_pil_image(pred_x)
+        output_image = TF.to_pil_image(predicted_tensor)
 
         out_dir = os.path.join("results_ui")
         os.makedirs(out_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         suffix = uuid.uuid4().hex[:8]
         out_path = os.path.join(out_dir, f"enhanced_{ts}_{suffix}.png")
-        out_img.save(out_path)
+        output_image.save(out_path)
         print(f"UI: saved {out_path}", flush=True)
 
-        return out_img
+        return output_image
 
     return infer
 

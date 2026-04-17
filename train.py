@@ -11,7 +11,7 @@ import torchvision
 import models
 import datasets
 import utils
-from models import DenoisingDiffusion
+from models import DenoisingDiffusionPipeline
 
 
 def parse_args_and_config():
@@ -28,20 +28,20 @@ def parse_args_and_config():
     args = parser.parse_args()
 
     with open(os.path.join("configs", args.config), "r") as f:
-        config = yaml.safe_load(f)
-    new_config = dict2namespace(config)
+        config_dict = yaml.safe_load(f)
+    config = dict2namespace(config_dict)
 
-    return args, new_config
+    return args, config
 
 
 def dict2namespace(config):
     namespace = argparse.Namespace()
     for key, value in config.items():
         if isinstance(value, dict):
-            new_value = dict2namespace(value)
+            namespace_value = dict2namespace(value)
         else:
-            new_value = value
-        setattr(namespace, key, new_value)
+            namespace_value = value
+        setattr(namespace, key, namespace_value)
     return namespace
 
 
@@ -61,12 +61,12 @@ def main():
 
     # data loading
     print("=> using dataset '{}'".format(config.data.train_dataset))
-    DATASET = datasets.__dict__[config.data.type](config)
+    dataset = datasets.__dict__[config.data.type](config)
 
     # create model
     print("=> creating denoising-diffusion model...")
-    diffusion = DenoisingDiffusion(args, config)
-    diffusion.train(DATASET)
+    diffusion = DenoisingDiffusionPipeline(args, config)
+    diffusion.train(dataset)
 
 
 if __name__ == "__main__":

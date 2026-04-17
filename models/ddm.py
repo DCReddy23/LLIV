@@ -8,10 +8,10 @@ import torch.nn.functional as F
 from collections import OrderedDict
 import utils
 from models.unet import DiffusionUNet
-from models.decom import CTDN
+from models.decom import DecompositionReconstructionNet
 
 
-class EMAHelper(object):
+class ExponentialMovingAverage(object):
     """
     Maintains an exponential moving average (EMA) of model parameters for evaluation stability.
     """
@@ -84,12 +84,13 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
     return betas
 
 
-class Net(nn.Module):
+class LatentRetinexDiffusionModel(nn.Module):
     """
-    Main model: wraps DiffusionUNet and CTDN. Handles both training and inference pipelines.
+    Main model: wraps DiffusionUNet and DecompositionReconstructionNet.
+    Handles both training and inference pipelines.
     """
     def __init__(self, args, config):
-        super(Net, self).__init__()
+        super().__init__()
 
         self.args = args
         self.config = config
@@ -97,9 +98,9 @@ class Net(nn.Module):
 
         self.Unet = DiffusionUNet(config)
         if self.args.mode == 'training':
-            self.decom = self.load_stage1(CTDN(), 'ckpt/stage1')
+            self.decom = self.load_stage1(DecompositionReconstructionNet(), 'ckpt/stage1')
         else:
-            self.decom = CTDN()
+            self.decom = DecompositionReconstructionNet()
 
         betas = get_beta_schedule(
             beta_schedule=config.diffusion.beta_schedule,
@@ -117,8 +118,8 @@ class Net(nn.Module):
         Compute cumulative product of (1-beta) up to timestep t for diffusion process.
         """
         beta = torch.cat([torch.zeros(1).to(beta.device), beta], dim=0)
-        a = (1 - beta).cumprod(dim=0).index_select(0, t + 1).view(-1, 1, 1, 1)
-        return a
+        alpha_cumprod = (1 - beta).cumprod(dim=0).index_select(0, t + 1).view(-1, 1, 1, 1)
+        return alpha_cumprod
 
     @staticmethod
     def load_stage1(model, model_dir):
@@ -134,28 +135,33 @@ class Net(nn.Module):
         DDIM-like sampling: generates predicted features from conditioning tensor.
         Used in both training and inference.
         """
-        skip = self.config.diffusion.num_diffusion_timesteps // self.config.diffusion.num_sampling_timesteps
-        seq = range(0, self.config.diffusion.num_diffusion_timesteps, skip)
-        n, c, h, w = x_cond.shape
-        seq_next = [-1] + list(seq[:-1])
-        x = torch.randn(n, c, h, w, device=self.device)
-        xs = [x]
-        for i, j in zip(reversed(seq), reversed(seq_next)):
-            t = (torch.ones(n) * i).to(x.device)
-            next_t = (torch.ones(n) * j).to(x.device)
-            at = self.compute_alpha(b, t.long())
-            at_next = self.compute_alpha(b, next_t.long())
-            xt = xs[-1].to(x.device)
+        stride = self.config.diffusion.num_diffusion_timesteps // self.config.diffusion.num_sampling_timesteps
+        sampling_timesteps = range(0, self.config.diffusion.num_diffusion_timesteps, stride)
+        batch_size, channels, height, width = x_cond.shape
+        next_timesteps = [-1] + list(sampling_timesteps[:-1])
 
-            et = self.Unet(torch.cat([x_cond, xt], dim=1), t)
-            x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
+        sample = torch.randn(batch_size, channels, height, width, device=self.device)
+        samples = [sample]
+        for i, j in zip(reversed(sampling_timesteps), reversed(next_timesteps)):
+            timestep = (torch.ones(batch_size) * i).to(sample.device)
+            next_timestep = (torch.ones(batch_size) * j).to(sample.device)
+            alpha_t = self.compute_alpha(b, timestep.long())
+            alpha_next_t = self.compute_alpha(b, next_timestep.long())
+            current_sample = samples[-1].to(sample.device)
 
-            c1 = eta * ((1 - at / at_next) * (1 - at_next) / (1 - at)).sqrt()
-            c2 = ((1 - at_next) - c1 ** 2).sqrt()
-            xt_next = at_next.sqrt() * x0_t + c1 * torch.randn_like(x) + c2 * et
-            xs.append(xt_next.to(x.device))
+            predicted_noise = self.Unet(torch.cat([x_cond, current_sample], dim=1), timestep)
+            predicted_clean = (current_sample - predicted_noise * (1 - alpha_t).sqrt()) / alpha_t.sqrt()
 
-        return xs[-1]
+            ddim_sigma = eta * ((1 - alpha_t / alpha_next_t) * (1 - alpha_next_t) / (1 - alpha_t)).sqrt()
+            ddim_coeff = ((1 - alpha_next_t) - ddim_sigma ** 2).sqrt()
+            next_sample = (
+                alpha_next_t.sqrt() * predicted_clean
+                + ddim_sigma * torch.randn_like(sample)
+                + ddim_coeff * predicted_noise
+            )
+            samples.append(next_sample.to(sample.device))
+
+        return samples[-1]
 
     def forward(self, inputs):
         """
@@ -165,50 +171,62 @@ class Net(nn.Module):
         """
         data_dict = {}
 
-        b = self.betas.to(inputs.device)
+        betas = self.betas.to(inputs.device)
 
         if self.training:
-            output = self.decom(inputs, pred_fea=None)
-            low_R, low_L, low_fea, high_L = output["low_R"], output["low_L"], \
-                output["low_fea"], output["high_L"]
-            low_condition_norm = utils.data_transform(low_fea)
+            decom_output = self.decom(inputs, pred_fea=None)
+            low_reflectance = decom_output["low_R"]
+            low_illumination = decom_output["low_L"]
+            low_features = decom_output["low_fea"]
+            high_illumination = decom_output["high_L"]
 
-            t = torch.randint(low=0, high=self.num_timesteps, size=(low_condition_norm.shape[0] // 2 + 1,)).to(
-                self.device)
-            t = torch.cat([t, self.num_timesteps - t - 1], dim=0)[:low_condition_norm.shape[0]].to(inputs.device)
-            a = (1 - b).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
+            low_condition_normalized = utils.data_transform(low_features)
 
-            e = torch.randn_like(low_condition_norm)
+            timestep_indices = torch.randint(
+                low=0,
+                high=self.num_timesteps,
+                size=(low_condition_normalized.shape[0] // 2 + 1,),
+            ).to(self.device)
+            timestep_indices = torch.cat(
+                [timestep_indices, self.num_timesteps - timestep_indices - 1],
+                dim=0,
+            )[:low_condition_normalized.shape[0]].to(inputs.device)
 
-            high_input_norm = utils.data_transform(low_R * high_L)
+            alpha_cumprod = (1 - betas).cumprod(dim=0).index_select(0, timestep_indices).view(-1, 1, 1, 1)
+            noise = torch.randn_like(low_condition_normalized)
 
-            x = high_input_norm * a.sqrt() + e * (1.0 - a).sqrt()
-            noise_output = self.Unet(torch.cat([low_condition_norm, x], dim=1), t.float())
+            high_input_normalized = utils.data_transform(low_reflectance * high_illumination)
+            noised_high_input = high_input_normalized * alpha_cumprod.sqrt() + noise * (1.0 - alpha_cumprod).sqrt()
 
-            pred_fea = self.sample_training(low_condition_norm, b)
-            pred_fea = utils.inverse_data_transform(pred_fea)
-            reference_fea = low_R * torch.pow(low_L, 0.2)
+            predicted_noise = self.Unet(
+                torch.cat([low_condition_normalized, noised_high_input], dim=1),
+                timestep_indices.float(),
+            )
 
-            data_dict["noise_output"] = noise_output
-            data_dict["e"] = e
+            predicted_features = self.sample_training(low_condition_normalized, betas)
+            predicted_features = utils.inverse_data_transform(predicted_features)
+            reference_features = low_reflectance * torch.pow(low_illumination, 0.2)
 
-            data_dict["pred_fea"] = pred_fea
-            data_dict["reference_fea"] = reference_fea
+            data_dict["noise_output"] = predicted_noise
+            data_dict["e"] = noise
+
+            data_dict["pred_fea"] = predicted_features
+            data_dict["reference_fea"] = reference_features
 
         else:
-            output = self.decom(inputs, pred_fea=None)
-            low_fea = output["low_fea"]
-            low_condition_norm = utils.data_transform(low_fea)
+            decom_output = self.decom(inputs, pred_fea=None)
+            low_features = decom_output["low_fea"]
+            low_condition_normalized = utils.data_transform(low_features)
 
-            pred_fea = self.sample_training(low_condition_norm, b)
-            pred_fea = utils.inverse_data_transform(pred_fea)
-            pred_x = self.decom(inputs, pred_fea=pred_fea)["pred_img"]
-            data_dict["pred_x"] = pred_x
+            predicted_features = self.sample_training(low_condition_normalized, betas)
+            predicted_features = utils.inverse_data_transform(predicted_features)
+            predicted_image = self.decom(inputs, pred_fea=predicted_features)["pred_img"]
+            data_dict["pred_x"] = predicted_image
 
         return data_dict
 
 
-class DenoisingDiffusion(object):
+class DenoisingDiffusionPipeline(object):
     """
     Training and inference harness for the diffusion model. Handles checkpointing, optimizer, and validation.
     """
@@ -218,10 +236,10 @@ class DenoisingDiffusion(object):
         self.config = config
         self.device = config.device
 
-        self.model = Net(args, config)
+        self.model = LatentRetinexDiffusionModel(args, config)
         self.model.to(self.device)
 
-        self.ema_helper = EMAHelper()
+        self.ema_helper = ExponentialMovingAverage()
         self.ema_helper.register(self.model)
 
         self.l2_loss = torch.nn.MSELoss()
@@ -251,7 +269,7 @@ class DenoisingDiffusion(object):
 
     def train(self, DATASET):
         """
-        Main training loop for diffusion model. Handles freezing CTDN, optimizer, validation, and checkpointing.
+        Main training loop for diffusion model. Handles freezing decomposition module, optimizer, validation, and checkpointing.
         """
         cudnn.benchmark = True
         train_loader, val_loader = DATASET.get_loaders()
@@ -338,3 +356,9 @@ class DenoisingDiffusion(object):
                 x = F.pad(x, (0, img_w_64 - img_w, 0, img_h_64 - img_h), 'reflect')
                 pred_x = self.model(x.to(self.device))["pred_x"][:, :, :img_h, :img_w]
                 utils.logging.save_image(pred_x, os.path.join(image_folder, str(step), '{}'.format(y[0])))
+
+
+# Backwards-compatible aliases (old names are kept so existing imports keep working).
+EMAHelper = ExponentialMovingAverage
+Net = LatentRetinexDiffusionModel
+DenoisingDiffusion = DenoisingDiffusionPipeline
