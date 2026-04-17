@@ -214,12 +214,21 @@ class LatentRetinexDiffusionModel(nn.Module):
             data_dict["reference_fea"] = reference_features
 
         else:
+            # Stage1 (Model1 / CTDN): consume a 6-channel tensor (low RGB + high RGB).
+            # In inference we typically duplicate low -> both halves, so inputs is (B,6,H,W).
+            # Output includes a low-resolution feature tensor `low_fea` used to condition diffusion.
             decom_output = self.decom(inputs, pred_fea=None)
             low_features = decom_output["low_fea"]
+
+            # Diffusion model operates in [-1, 1] space.
             low_condition_normalized = utils.data_transform(low_features)
 
+            # Stage2 (Model2 / DiffusionUNet sampler): predict an improved feature map with the
+            # same shape as `low_fea` (B,3,H/8,W/8), then map back to [0,1].
             predicted_features = self.sample_training(low_condition_normalized, betas)
             predicted_features = utils.inverse_data_transform(predicted_features)
+
+            # Stage1 again (decoder path): take predicted features and reconstruct enhanced RGB.
             predicted_image = self.decom(inputs, pred_fea=predicted_features)["pred_img"]
             data_dict["pred_x"] = predicted_image
 

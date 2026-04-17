@@ -2,7 +2,13 @@
 
 Low-light image enhancement (stage2 diffusion restoration) with optional upload UI.
 
-Full code map + deeper explanations: [PROJECT_GUIDE.md](PROJECT_GUIDE.md).
+Docs (recommended reading order):
+
+1. [README.md](README.md) — quickstart commands
+2. [PROJECT_GUIDE.md](PROJECT_GUIDE.md) — repo map + how to run
+3. [TECHNICAL_DEEP_DIVE_COMPACT.md](TECHNICAL_DEEP_DIVE_COMPACT.md) — short architecture brief
+4. [MODEL1_MODEL2_CORE_EXPLANATION.md](MODEL1_MODEL2_CORE_EXPLANATION.md) — Model1/Model2 handshake explained
+5. [TECHNICAL_DEEP_DIVE.md](TECHNICAL_DEEP_DIVE.md) — full presentation-ready deep dive
 
 ## Quickstart (Windows)
 

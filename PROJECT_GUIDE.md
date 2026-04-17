@@ -2,6 +2,8 @@
 
 This repository contains a two-stage low-light image enhancement pipeline. In practice you will mostly **run stage2 inference** using a provided checkpoint.
 
+If you want a focused explanation of just the core architecture (Model1/Model2), see: `MODEL1_MODEL2_CORE_EXPLANATION.md`.
+
 ## 1) Repository map (what each file/folder does)
 
 ### Top-level entrypoints

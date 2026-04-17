@@ -12,6 +12,7 @@ from PIL import Image, ImageOps
 from torchvision.transforms import functional as TF
 
 from models import DenoisingDiffusionPipeline
+import utils
 
 
 def dict2namespace(config: dict) -> argparse.Namespace:
@@ -160,7 +161,7 @@ def make_infer_fn(config_path: str, resume_path: str):
     quality_steps = 50
 
     @torch.no_grad()
-    def infer(input_image: Image.Image, quality: str, blend: str) -> Image.Image:
+    def infer(input_image: Image.Image, quality: str, blend: str, show_stage_outputs: bool) -> tuple[Image.Image, dict]:
         if input_image is None:
             raise gr.Error("Please upload an image")
 
@@ -216,18 +217,68 @@ def make_infer_fn(config_path: str, resume_path: str):
         conditioning_tensor_cpu = TF.to_tensor(input_image).unsqueeze(0)  # 1x3xHxW in [0,1]
         _, _, height, width = conditioning_tensor_cpu.shape
 
+        debug_lines: list[str] = []
+        if show_stage_outputs:
+            def _tensor_stats(x: torch.Tensor) -> str:
+                x = x.detach()
+                # Keep stats lightweight and readable.
+                return (
+                    f"shape={tuple(x.shape)} dtype={x.dtype} "
+                    f"min={x.min().item():.4f} max={x.max().item():.4f} "
+                    f"mean={x.mean().item():.4f} std={x.std(unbiased=False).item():.4f}"
+                )
+
+            debug_lines.append(f"device={device}")
+            debug_lines.append(f"input: shape={(1, 3, height, width)} range=[0,1]")
+
         try:
             conditioning_tensor = conditioning_tensor_cpu.to(device)
             conditioning_tensor, _, _ = _pad_to_64(conditioning_tensor)
 
             # Model expects 6-channel input (low + high). For inference we reuse low as both.
             model_input = torch.cat([conditioning_tensor, conditioning_tensor], dim=1)
-            predicted_tensor = diffusion.model(model_input)["pred_x"][0, :, :height, :width].detach().cpu().clamp(0, 1)
+
+            if show_stage_outputs:
+                # ------------------------
+                # Model 1 (stage1 / CTDN) is invoked first to compute low-level features + Retinex pieces.
+                # Model 2 (stage2 / diffusion) then predicts a refined feature tensor.
+                # Finally, Model 1 is invoked again in decode mode to map predicted features -> RGB.
+                # ------------------------
+                decom_out = diffusion.model.decom(model_input, pred_fea=None)
+                low_fea = decom_out["low_fea"]
+                low_R = decom_out["low_R"]
+                low_L = decom_out["low_L"]
+
+                debug_lines.append("MODEL1 outputs (from DecompositionReconstructionNet)")
+                debug_lines.append(f"- low_fea: {_tensor_stats(low_fea)}")
+                debug_lines.append(f"- low_R  : {_tensor_stats(low_R)}")
+                debug_lines.append(f"- low_L  : {_tensor_stats(low_L)}")
+
+                # Stage2 diffusion operates in [-1,1] feature space.
+                betas = diffusion.model.betas.to(device)
+                cond = utils.data_transform(low_fea)
+                pred_fea_norm = diffusion.model.sample_training(cond, betas)
+                pred_fea = utils.inverse_data_transform(pred_fea_norm)
+
+                debug_lines.append("MODEL2 outputs (from diffusion sampler)")
+                debug_lines.append(f"- cond (data_transform(low_fea)): {_tensor_stats(cond)}")
+                debug_lines.append(f"- pred_fea_norm ([-1,1]): {_tensor_stats(pred_fea_norm)}")
+                debug_lines.append(f"- pred_fea ([0,1]): {_tensor_stats(pred_fea)}")
+
+                pred_img = diffusion.model.decom(model_input, pred_fea=pred_fea)["pred_img"]
+            else:
+                pred_img = diffusion.model(model_input)["pred_x"]
+
+            predicted_tensor = pred_img[0, :, :height, :width].detach().cpu().clamp(0, 1)
         except torch.OutOfMemoryError:
             if device.type != "cuda":
                 raise
             torch.cuda.empty_cache()
             print(f"UI: CUDA OOM on full-res {height}x{width}; using tiled inference...", flush=True)
+            if show_stage_outputs:
+                debug_lines.append(
+                    "NOTE: CUDA OOM triggered tiled inference; intermediate stage tensors are not captured in this mode."
+                )
             predicted_tensor = _infer_tiled(
                 diffusion,
                 conditioning_tensor_cpu,
@@ -247,7 +298,11 @@ def make_infer_fn(config_path: str, resume_path: str):
         output_image.save(out_path)
         print(f"UI: saved {out_path}", flush=True)
 
-        return output_image
+        if show_stage_outputs:
+            debug_text = "\n".join(debug_lines)
+            return output_image, gr.update(value=debug_text, visible=True)
+
+        return output_image, gr.update(value="", visible=False)
 
     return infer
 
@@ -267,23 +322,38 @@ def main():
 
     infer_fn = make_infer_fn(args.config, args.resume)
 
-    demo = gr.Interface(
-        fn=infer_fn,
-        inputs=[
-            gr.Image(type="pil", label="Upload image"),
-            gr.Dropdown(
-                choices=["Low (fast)", "Normal", "Higher quality"],
-                value="Normal",
-                label="Quality",
-            ),
-            gr.Dropdown(
-                choices=["High blend (seamless)", "Normal"],
-                value="High blend (seamless)",
-                label="Blend",
-            ),
-        ],
-        outputs=gr.Image(type="pil", label="Enhanced output"),
-    )
+    with gr.Blocks() as demo:
+        gr.Markdown("# LLIV stage2 inference")
+
+        input_image = gr.Image(type="pil", label="Upload image")
+        quality = gr.Dropdown(
+            choices=["Low (fast)", "Normal", "Higher quality"],
+            value="Normal",
+            label="Quality",
+        )
+        blend = gr.Dropdown(
+            choices=["High blend (seamless)", "Normal"],
+            value="High blend (seamless)",
+            label="Blend",
+        )
+        show_stage_outputs = gr.Checkbox(
+            value=False,
+            label="Show stage outputs (Model1/Model2)",
+        )
+        run_btn = gr.Button("Enhance")
+
+        output_image = gr.Image(type="pil", label="Enhanced output")
+        stage_text = gr.Textbox(
+            label="Stage outputs (Model1/Model2)",
+            lines=18,
+            visible=False,
+        )
+
+        run_btn.click(
+            fn=infer_fn,
+            inputs=[input_image, quality, blend, show_stage_outputs],
+            outputs=[output_image, stage_text],
+        )
 
     demo.launch(server_name=args.host, server_port=args.port)
 

@@ -366,6 +366,14 @@ class DecompositionReconstructionNet(nn.Module):
     def forward(self, images, pred_fea=None):
 
         output = {}
+        # NOTE: `images` is expected to be 6-channel: (low RGB, high RGB) concatenated on channel dim.
+        # - images[:, :3, ...] is treated as the low-light image
+        # - images[:, 3:, ...] is treated as the high-light/reference image
+        # During inference we often pass (low, low) since no paired high image exists.
+        #
+        # Two modes:
+        # 1) pred_fea is None  -> "decompose" mode: returns dict containing low/high features + Retinex pieces.
+        # 2) pred_fea is given -> "decode" mode: reconstruct RGB from predicted features (used by stage2).
         # =================decomposition low=================
         if pred_fea is None:
             low_fea_down8, high_fea_down8 = self.ReconNet(images, pred_fea=None)

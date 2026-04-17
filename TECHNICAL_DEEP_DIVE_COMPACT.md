@@ -7,8 +7,8 @@ This is the **short version** of `TECHNICAL_DEEP_DIVE.md`: enough to understand 
 - **Input:** a low-light RGB image
 - **Output:** an enhanced RGB image
 - **Core idea:** a **two-stage pipeline**
-   - **Stage1 (DecompositionReconstructionNet / Retinex-like)**: decomposes low/high into reflectance + illumination and provides a decoder to reconstruct an image from “features”. (Alias: `CTDN`)
-   - **Stage2 (Diffusion)**: uses a diffusion sampler (DDIM-like) + U-Net to **predict better features**, then the decomposition/reconstruction net reconstructs the enhanced image.
+  - **Stage1 (DecompositionReconstructionNet / Retinex-like)**: decomposes low/high into reflectance + illumination and provides a decoder to reconstruct an image from “features”. (Alias: `CTDN`)
+  - **Stage2 (Diffusion)**: uses a diffusion sampler (DDIM-like) + U-Net to **predict better features**, then the decomposition/reconstruction net reconstructs the enhanced image.
 
 In practice, for enhancement you run **stage2 inference** using:
 
@@ -49,6 +49,40 @@ In practice, for enhancement you run **stage2 inference** using:
 5. Map predicted features back to `[0,1]`.
 6. Decomposition/reconstruction net reconstruction uses `pred_fea` to decode the enhanced RGB:
    - `pred_img = DecompositionReconstructionNet(x_in, pred_fea=pred_fea)["pred_img"]` (alias: `CTDN`)
+
+### 3.1) What each stage outputs (what to look at)
+
+**Stage1 / Model1 (`DecompositionReconstructionNet`, alias `CTDN`)**
+
+When called as `CTDN(x_in, pred_fea=None)` it returns a dict with:
+
+- `low_fea`: `(B,3,H/8,W/8)` — low-resolution feature tensor used as the diffusion conditioning
+- `low_R`: `(B,3,H/8,W/8)` — estimated reflectance
+- `low_L`: `(B,3,H/8,W/8)` — estimated illumination
+- `high_fea`, `high_R`, `high_L`: same outputs computed from the 2nd half of `x_in` (the “high” image)
+
+When called as `CTDN(x_in, pred_fea=<tensor>)` it returns:
+
+- `pred_img`: `(B,3,H,W)` — reconstructed/enhanced RGB image
+
+**Stage2 / Model2 (diffusion sampler + U-Net)**
+
+- Consumes `cond = data_transform(low_fea)` where `data_transform(X)=2X-1` maps `[0,1] → [-1,1]`
+- Produces `pred_fea_norm` in `[-1,1]`, then `pred_fea = inverse_data_transform(pred_fea_norm)` back in `[0,1]`
+- `pred_fea` is fed back into Stage1 to decode the final RGB
+
+### 3.2) UI: showing stage outputs during inference
+
+The Gradio UI (`app.py`) now returns two outputs:
+
+- the final enhanced image
+- a text panel that prints the stage outputs (Model1 dict keys + tensor stats, and Model2 feature stats)
+
+The stage-output panel is **hidden by default** and can be toggled with:
+
+- `Show stage outputs (Model1/Model2)`
+
+This is useful for verifying what Model1 is producing (`low_fea/low_R/low_L`) and what Model2 is changing (`pred_fea`).
 
 ## 4) What controls quality vs speed
 
