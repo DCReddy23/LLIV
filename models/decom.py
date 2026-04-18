@@ -395,7 +395,7 @@ class DecompositionReconstructionNet(nn.Module):
         return output
 
 
-# Backwards-compatible aliases (old names are kept so existing imports keep working).
+# Backwards-compatible aliases 
 Depth_conv = DepthConv
 Res_block = ResidualBlock
 upsampling = UpsamplingBlock

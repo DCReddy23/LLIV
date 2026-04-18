@@ -240,7 +240,6 @@ class DiffusionRestorationPipeline:
         raise torch.OutOfMemoryError("Unable to run tiled inference within GPU memory limits.")
 
 
-# Backwards-compatible alias
 DiffusiveRestoration = DiffusionRestorationPipeline
 
 
